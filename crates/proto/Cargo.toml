@@ -1,0 +1,13 @@
+[package]
+name    = "detour-proto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tonic       = { workspace = true }
+tonic-prost = "0.14"
+prost       = { workspace = true }
+
+[build-dependencies]
+tonic-prost-build   = "0.14"
+protoc-bin-vendored = "3"

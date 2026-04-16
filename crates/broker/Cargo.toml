@@ -1,0 +1,28 @@
+[package]
+name    = "detour-broker"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "detour-broker"
+path = "src/main.rs"
+
+[dependencies]
+detour-proto = { path = "../proto" }
+detour-core  = { path = "../core" }
+
+tokio        = { workspace = true }
+tonic        = { workspace = true }
+axum         = { workspace = true }
+redis        = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+uuid         = { workspace = true }
+jsonwebtoken = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow       = { workspace = true }
+async-trait  = { workspace = true }
+futures      = { workspace = true }
+tokio-stream = { workspace = true }
+bytes        = { workspace = true }

@@ -1,0 +1,105 @@
+syntax = "proto3";
+
+package detour;
+
+service Detour {
+    // Agent calls this on connect — opens the bidirectional tunnel stream
+    rpc OpenTunnel(stream AgentMessage) returns (stream BrokerMessage);
+
+    // Sidecar calls this to relay a matched inbound request (body streamed as chunks)
+    rpc RelayRequest(stream RelayRequestMsg) returns (stream RelayResponseMsg);
+
+    // Sidecar calls this on session cache miss
+    rpc LookupSession(LookupRequest) returns (LookupResponse);
+}
+
+// ── Agent → Broker ────────────────────────────────────────────────────────────
+
+message AgentMessage {
+    oneof payload {
+        RegisterSession register  = 1;
+        Heartbeat       heartbeat = 2;
+        RelayResponse   response  = 3;
+    }
+}
+
+message RegisterSession {
+    string session_id       = 1;
+    string auth_mode        = 2; // "session-id" | "signed-token"
+    string service_name     = 3;
+    repeated string allowed_services = 4;
+}
+
+message Heartbeat {
+    string session_id = 1;
+}
+
+message RelayResponse {
+    string request_id       = 1;
+    uint32 status_code      = 2;
+    repeated Header headers = 3;
+    bytes  body_chunk       = 4;
+    bool   end_of_body      = 5;
+}
+
+// ── Broker → Agent ────────────────────────────────────────────────────────────
+
+message BrokerMessage {
+    oneof payload {
+        SessionAck   ack     = 1;
+        RelayRequest request = 2;
+    }
+}
+
+message SessionAck {
+    string session_id = 1;
+    uint64 ttl        = 2; // seconds
+}
+
+message RelayRequest {
+    string request_id       = 1;
+    string method           = 2;
+    string path             = 3;
+    repeated Header headers = 4;
+    bytes  body_chunk       = 5;
+    bool   end_of_body      = 6;
+}
+
+// ── Relay RPCs (sidecar ↔ broker) ────────────────────────────────────────────
+
+message RelayRequestMsg {
+    string request_id       = 1;
+    string session_id       = 2;
+    string method           = 3;
+    string path             = 4;
+    repeated Header headers = 5;
+    bytes  body_chunk       = 6;
+    bool   end_of_body      = 7;
+}
+
+message RelayResponseMsg {
+    string request_id       = 1;
+    uint32 status_code      = 2;
+    repeated Header headers = 3;
+    bytes  body_chunk       = 4;
+    bool   end_of_body      = 5;
+}
+
+// ── Session lookup (sidecar cache miss) ──────────────────────────────────────
+
+message LookupRequest {
+    string session_id = 1;
+}
+
+message LookupResponse {
+    bool   found        = 1;
+    string service_name = 2;
+    string auth_mode    = 3;
+}
+
+// ── Shared ────────────────────────────────────────────────────────────────────
+
+message Header {
+    string name  = 1;
+    string value = 2;
+}

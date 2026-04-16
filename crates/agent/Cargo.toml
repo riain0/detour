@@ -1,0 +1,24 @@
+[package]
+name    = "detour-agent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+detour-proto = { path = "../proto" }
+detour-core  = { path = "../core" }
+
+tokio        = { workspace = true }
+tonic        = { workspace = true }
+hyper        = { workspace = true }
+hyper-util   = { workspace = true }
+axum         = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+uuid         = { workspace = true }
+tracing      = { workspace = true }
+anyhow       = { workspace = true }
+futures      = { workspace = true }
+tokio-stream = { workspace = true }
+bytes        = { workspace = true }
+http             = { workspace = true }
+http-body-util   = { workspace = true }

@@ -1,0 +1,32 @@
+[package]
+name    = "detour-sidecar"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "detour-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+detour-proto = { path = "../proto" }
+detour-core  = { path = "../core" }
+
+tokio        = { workspace = true }
+tonic        = { workspace = true }
+hyper        = { workspace = true }
+hyper-util   = { workspace = true }
+tower        = { workspace = true }
+axum         = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+uuid         = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow       = { workspace = true }
+async-trait  = { workspace = true }
+futures      = { workspace = true }
+bytes        = { workspace = true }
+http         = { workspace = true }
+tokio-stream     = { workspace = true }
+http-body-util   = { workspace = true }
+reqwest          = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

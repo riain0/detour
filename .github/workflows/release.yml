@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+
+          - target: x86_64-apple-darwin
+            os: macos-latest
+
+          - target: aarch64-apple-darwin
+            os: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build (native)
+        if: "!matrix.cross"
+        run: |
+          cargo build --release --target ${{ matrix.target }} \
+            --package detour-broker \
+            --package detour-sidecar \
+            --package detour-cli
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: |
+          cross build --release --target ${{ matrix.target }} \
+            --package detour-broker \
+            --package detour-sidecar \
+            --package detour-cli
+
+      - name: Package
+        shell: bash
+        run: |
+          BIN_DIR=target/${{ matrix.target }}/release
+          ARCHIVE=detour-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          cp "$BIN_DIR/detour-broker"  detour-broker
+          cp "$BIN_DIR/detour-sidecar" detour-sidecar
+          cp "$BIN_DIR/detour"         detour
+          tar czf "$ARCHIVE" detour-broker detour-sidecar detour
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
+
+  docker:
+    name: Publish Docker images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push broker
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/broker.Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/detour-broker:latest
+            ghcr.io/${{ github.repository_owner }}/detour-broker:${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push sidecar
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/sidecar.Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/detour-sidecar:latest
+            ghcr.io/${{ github.repository_owner }}/detour-sidecar:${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    name: Publish release
+    needs: [build, docker]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

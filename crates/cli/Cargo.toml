@@ -1,0 +1,20 @@
+[package]
+name    = "detour-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "detour"
+path = "src/main.rs"
+
+[dependencies]
+detour-agent = { path = "../agent" }
+detour-core  = { path = "../core" }
+
+tokio        = { workspace = true }
+clap         = { workspace = true }
+serde_json   = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow       = { workspace = true }
+reqwest      = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
