@@ -6,9 +6,9 @@ use tokio::sync::Mutex;
 use detour_core::{SessionId, SessionRecord};
 
 struct Entry {
-    record:    SessionRecord,
-    inserted:  Instant,
-    ttl:       Duration,
+    record: SessionRecord,
+    inserted: Instant,
+    ttl: Duration,
 }
 
 impl Entry {
@@ -20,14 +20,14 @@ impl Entry {
 #[derive(Clone)]
 pub struct SessionCache {
     inner: Arc<Mutex<HashMap<String, Entry>>>,
-    ttl:   Duration,
+    ttl: Duration,
 }
 
 impl SessionCache {
     pub fn new(ttl_secs: u64) -> Self {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
-            ttl:   Duration::from_secs(ttl_secs),
+            ttl: Duration::from_secs(ttl_secs),
         }
     }
 
@@ -49,7 +49,7 @@ impl SessionCache {
             Entry {
                 record,
                 inserted: Instant::now(),
-                ttl:      self.ttl,
+                ttl: self.ttl,
             },
         );
     }

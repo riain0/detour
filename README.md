@@ -38,7 +38,7 @@ The broker is a small gRPC relay server. Deploy it once and share it across serv
 docker run -p 50051:50051 ghcr.io/riain0/detour-broker:latest
 ```
 
-**With Redis (recommended)** — sessions survive broker restarts and the broker logs which backend it is using at startup:
+**With Redis (recommended)** — sessions survive broker restarts:
 
 ```bash
 docker run -p 50051:50051 \
@@ -54,7 +54,7 @@ Without Redis the broker falls back to in-memory automatically.
 |---|---|---|
 | `PORT` | `8080` | gRPC listen port |
 | `REDIS_URL` | `redis://127.0.0.1:6379` | Session storage. Falls back to in-memory if unreachable |
-| `DETOUR_SESSION_TTL_SECS` | `28800` | Session lifetime in seconds (8h) |
+| `DETOUR_SESSION_TTL_SECS` | `28800` | Session lifetime in seconds (8 h) |
 | `DETOUR_AUTH_MODE` | `session-id` | `session-id` or `signed-token` |
 
 ### Broker IaC
@@ -63,7 +63,7 @@ Terraform snippets are in [`deploy/terraform/`](deploy/terraform/).
 
 **GCP Cloud Run** — [`deploy/terraform/gcp/broker.tf`](deploy/terraform/gcp/broker.tf)
 
-**AWS Fargate** — [`deploy/terraform/aws/broker.tf`](deploy/terraform/aws/broker.tf) (requires an ACM certificate — ALB needs HTTPS for gRPC)
+**AWS Fargate** — [`deploy/terraform/aws/broker.tf`](deploy/terraform/aws/broker.tf)
 
 ---
 
@@ -85,16 +85,16 @@ Set `DETOUR_SERVICE_NAME` to the same name developers will use when starting the
 
 ### Sidecar IaC
 
-**GCP Cloud Run** — add to your existing `google_cloud_run_v2_service` from [`deploy/terraform/gcp/sidecar.tf`](deploy/terraform/gcp/sidecar.tf):
+**GCP Cloud Run** — add to your existing `google_cloud_run_v2_service`:
 
 ```hcl
-# 1. Make your existing ports block conditional
+# Make your existing ports block conditional
 dynamic "ports" {
   for_each = var.detour_enabled ? [] : [1]
   content { container_port = 8080 }
 }
 
-# 2. Add the sidecar container
+# Add the sidecar container
 dynamic "containers" {
   for_each = var.detour_enabled ? [1] : []
   content {
@@ -108,7 +108,7 @@ dynamic "containers" {
 }
 ```
 
-Also set `execution_environment = "EXECUTION_ENVIRONMENT_GEN2"` on your template (required for multi-container).
+Also set `execution_environment = "EXECUTION_ENVIRONMENT_GEN2"` on your template (required for multi-container Cloud Run).
 
 **AWS Fargate** — [`deploy/terraform/aws/sidecar.tf`](deploy/terraform/aws/sidecar.tf):
 
@@ -127,10 +127,6 @@ container_definitions = jsonencode(concat(
     ]
   }] : []
 ))
-
-resource "aws_lb_target_group" "app" {
-  port = var.detour_enabled ? 8081 : 8080
-}
 ```
 
 Set `detour_enabled = false` in production — the sidecar is never deployed and your service is unchanged.
@@ -149,6 +145,20 @@ curl -L https://github.com/riain0/detour/releases/latest/download/detour-latest-
 sudo mv detour /usr/local/bin/
 ```
 
+**macOS (Intel):**
+```bash
+curl -L https://github.com/riain0/detour/releases/latest/download/detour-latest-x86_64-apple-darwin.tar.gz | tar xz
+sudo mv detour /usr/local/bin/
+```
+
+**Linux (x86_64):**
+```bash
+curl -L https://github.com/riain0/detour/releases/latest/download/detour-latest-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv detour /usr/local/bin/
+```
+
+**Windows:** Download from the [releases page](https://github.com/riain0/detour/releases) and add to `PATH`, or set `detour.cliPath` in the VS Code extension settings.
+
 **VS Code extension** — install Detour from the marketplace. The extension downloads the CLI automatically on first use (macOS and Linux).
 
 **From source** (requires Rust 1.75+):
@@ -166,7 +176,9 @@ detour start --route my-api:3000 --broker https://broker.example.com
   Detour v0.1.0
   Connecting to https://broker.example.com ...
 
-  my-api  →  X-Route-To: a3f8c2d1-9e4b-4f1a-8c7d-2b5e6f0a1c3d  →  localhost:3000
+  X-Route-To: a3f8c2d1-9e4b-4f1a-8c7d-2b5e6f0a1c3d
+
+  my-api  →  localhost:3000
 
   Status: connected
 ```
@@ -188,7 +200,22 @@ detour start \
   --broker https://broker.example.com
 ```
 
-Each route gets its own session ID and independent tunnel.
+All routes share a single session ID. The broker and sidecar use the service name to route each relayed request to the correct local port.
+
+### Outbound tunneling
+
+When your local service needs to reach cloud dependencies (databases, caches, internal APIs), the agent runs a SOCKS5 proxy on `127.0.0.1:1081`. Combined with the `LD_PRELOAD` layer library, all outbound TCP from your process is automatically tunneled through the broker — no code changes required.
+
+```bash
+# Set LD_PRELOAD and start your service
+LD_PRELOAD=/path/to/libdetour_layer.so \
+DETOUR_SOCKS5_PORT=1081 \
+node server.js
+```
+
+The VS Code extension can do this automatically. Open a Detour terminal (`Ctrl+Shift+P` → **Detour: Open Terminal**) and the environment variables are already set. The extension also injects them into debug sessions when the agent is connected.
+
+Builds of `libdetour_layer.so` (Linux) and `libdetour_layer.dylib` (macOS) are included in each release.
 
 ### CLI reference
 
@@ -196,6 +223,7 @@ Each route gets its own session ID and independent tunnel.
 |---|---|---|---|
 | `--route SERVICE:PORT` | | | Service name and local port. Repeatable |
 | `--broker URL` | `DETOUR_BROKER_URL` | `http://localhost:50051` | Broker URL |
+| `--socks5-port` | | `1081` | SOCKS5 proxy port for outbound tunneling |
 | `--output` | | `human` | `human` or `json` (for tooling integrations) |
 
 ### Local status
@@ -211,10 +239,12 @@ curl http://localhost:29876/status
   "broker_url": "https://broker.example.com",
   "sessions": [
     { "service": "payments-api", "session_id": "a3f8c2d1-...", "port": 3001, "status": "connected" },
-    { "service": "user-api",     "session_id": "b7e2d4f9-...", "port": 3002, "status": "connected" }
+    { "service": "user-api",     "session_id": "a3f8c2d1-...", "port": 3002, "status": "connected" }
   ]
 }
 ```
+
+Note: all routes share the same `session_id`. The per-session fields distinguish which service each entry is for.
 
 ---
 

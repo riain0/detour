@@ -12,16 +12,16 @@ use detour_proto::detour::{
     RegisterSession, RouteEntry,
 };
 
-const HEARTBEAT_INTERVAL:  Duration = Duration::from_secs(30);
-const RECONNECT_DELAY:     Duration = Duration::from_secs(3);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
 
 pub async fn run(
-    broker_url:  String,
-    auth_mode:   AuthMode,
-    routes:      Vec<ServiceRoute>,
-    session_id:  SessionId,
-    status_tx:   watch::Sender<TunnelStatus>,
+    broker_url: String,
+    auth_mode: AuthMode,
+    routes: Vec<ServiceRoute>,
+    session_id: SessionId,
+    status_tx: watch::Sender<TunnelStatus>,
     shutdown_rx: oneshot::Receiver<()>,
 ) {
     let mut shutdown_rx = Some(shutdown_rx);
@@ -55,58 +55,56 @@ pub async fn run(
 
 async fn connect_and_run(
     broker_url: &str,
-    auth_mode:  &AuthMode,
-    routes:     &[ServiceRoute],
+    auth_mode: &AuthMode,
+    routes: &[ServiceRoute],
     session_id: &SessionId,
-    status_tx:  &watch::Sender<TunnelStatus>,
+    status_tx: &watch::Sender<TunnelStatus>,
 ) -> anyhow::Result<()> {
     info!(broker_url = %broker_url, "connecting to broker");
     let mut endpoint = Channel::from_shared(broker_url.to_string())?;
     if broker_url.starts_with("https://") {
         endpoint = endpoint.tls_config(ClientTlsConfig::new().with_webpki_roots())?;
     }
-    let channel = endpoint
-        .connect()
-        .await
-        .map_err(|e| {
-            warn!(error = %e, broker_url = %broker_url, "failed to connect to broker");
-            e
-        })?;
+    let channel = endpoint.connect().await.map_err(|e| {
+        warn!(error = %e, broker_url = %broker_url, "failed to connect to broker");
+        e
+    })?;
     info!("broker channel established");
 
     let mut client = DetourClient::new(channel);
 
     let (tx, rx) = tokio::sync::mpsc::channel::<AgentMessage>(64);
 
-    let proto_routes: Vec<RouteEntry> = routes.iter()
+    let proto_routes: Vec<RouteEntry> = routes
+        .iter()
         .map(|r| RouteEntry {
             service_name: r.service_name.clone(),
-            local_port:   r.local_port as u32,
+            local_port: r.local_port as u32,
         })
         .collect();
 
     tx.send(AgentMessage {
         payload: Some(agent_message::Payload::Register(RegisterSession {
             session_id: session_id.to_string(),
-            auth_mode:  auth_mode.to_string(),
-            routes:     proto_routes,
+            auth_mode: auth_mode.to_string(),
+            routes: proto_routes,
         })),
     })
     .await?;
 
     let request_stream = ReceiverStream::new(rx);
-    let response = client.open_tunnel(request_stream).await
-        .map_err(|e| {
-            warn!(error = %e, "open_tunnel RPC failed");
-            e
-        })?;
+    let response = client.open_tunnel(request_stream).await.map_err(|e| {
+        warn!(error = %e, "open_tunnel RPC failed");
+        e
+    })?;
     let mut inbound = response.into_inner();
 
     let _ = status_tx.send(TunnelStatus::Connected);
     info!(session_id = %session_id, "tunnel connected");
 
     // Build service_name → local_port map for request dispatch
-    let route_map: HashMap<String, u16> = routes.iter()
+    let route_map: HashMap<String, u16> = routes
+        .iter()
         .map(|r| (r.service_name.clone(), r.local_port))
         .collect();
 

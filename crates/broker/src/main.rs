@@ -50,17 +50,17 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let jwt_secret   = env::var("DETOUR_JWT_SECRET").ok();
-    let auth         = Arc::new(AuthService::new(config.auth_mode.clone(), jwt_secret));
-    let connections  = ConnectionMap::default();
+    let jwt_secret = env::var("DETOUR_JWT_SECRET").ok();
+    let auth = Arc::new(AuthService::new(config.auth_mode.clone(), jwt_secret));
+    let connections = ConnectionMap::default();
 
     let service = RelayService {
-        registry:         Arc::clone(&registry),
+        registry: Arc::clone(&registry),
         connections,
         pending_requests: PendingRequests::default(),
         auth,
         broker_id,
-        ttl_secs:         config.session_ttl_secs,
+        ttl_secs: config.session_ttl_secs,
     };
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
@@ -86,13 +86,12 @@ fn config_from_env() -> BrokerConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(AuthMode::SessionId),
-        redis_url: env::var("REDIS_URL")
-            .unwrap_or_else(|_| "redis://127.0.0.1:6379".into()),
+        redis_url: env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into()),
         session_ttl_secs: env::var("DETOUR_SESSION_TTL_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(8 * 3600),
         tls_cert_path: env::var("TLS_CERT_PATH").ok(),
-        tls_key_path:  env::var("TLS_KEY_PATH").ok(),
+        tls_key_path: env::var("TLS_KEY_PATH").ok(),
     }
 }

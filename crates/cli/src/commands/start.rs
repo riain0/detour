@@ -12,7 +12,11 @@ pub struct StartArgs {
     pub routes: Vec<String>,
 
     /// Broker URL (overrides DETOUR_BROKER_URL env var)
-    #[arg(long, env = "DETOUR_BROKER_URL", default_value = "http://localhost:50051")]
+    #[arg(
+        long,
+        env = "DETOUR_BROKER_URL",
+        default_value = "http://localhost:50051"
+    )]
     pub broker: String,
 
     /// Output format: "human" or "json"
@@ -33,21 +37,26 @@ pub async fn run(args: StartArgs) -> anyhow::Result<()> {
         anyhow::bail!("at least one --route SERVICE:PORT is required");
     }
 
-    let auth_mode: AuthMode = args.auth_mode.parse()
+    let auth_mode: AuthMode = args
+        .auth_mode
+        .parse()
         .map_err(|e: detour_core::DetourError| anyhow::anyhow!(e))?;
 
-    let routes = args.routes.iter()
+    let routes = args
+        .routes
+        .iter()
         .map(|r| parse_route(r))
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     let config = AgentConfig {
-        broker_url:  args.broker.clone(),
+        broker_url: args.broker.clone(),
         routes,
         auth_mode,
         socks5_port: args.socks5_port,
     };
 
-    let handle = AgentHandle::start(config).await
+    let handle = AgentHandle::start(config)
+        .await
         .map_err(|e| anyhow::anyhow!(e))?;
 
     let sessions = handle.sessions();
@@ -63,19 +72,26 @@ pub async fn run(args: StartArgs) -> anyhow::Result<()> {
         loop {
             match handle.status() {
                 TunnelStatus::Connected => return true,
-                TunnelStatus::Stopped   => return false,
-                _ => { tokio::time::sleep(Duration::from_millis(100)).await; }
+                TunnelStatus::Stopped => return false,
+                _ => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
             }
         }
-    }).await.unwrap_or(false);
+    })
+    .await
+    .unwrap_or(false);
 
     if args.output == "json" {
-        let sessions_json: Vec<_> = sessions.iter().map(|(svc, sid)| {
-            serde_json::json!({
-                "service":    svc,
-                "session_id": sid.as_str(),
+        let sessions_json: Vec<_> = sessions
+            .iter()
+            .map(|(svc, sid)| {
+                serde_json::json!({
+                    "service":    svc,
+                    "session_id": sid.as_str(),
+                })
             })
-        }).collect();
+            .collect();
         let event = serde_json::json!({
             "event":      if connected { "ready" } else { "error" },
             "ts":         now_rfc3339(),
@@ -83,7 +99,9 @@ pub async fn run(args: StartArgs) -> anyhow::Result<()> {
             "broker_url": args.broker,
         });
         println!("{}", event);
-        if !connected { anyhow::bail!("failed to connect to broker"); }
+        if !connected {
+            anyhow::bail!("failed to connect to broker");
+        }
     } else if connected {
         // All sessions share the same session_id — print it once
         if let Some((_, sid)) = sessions.first() {
@@ -91,11 +109,15 @@ pub async fn run(args: StartArgs) -> anyhow::Result<()> {
             eprintln!("  X-Route-To: {}", sid);
             eprintln!();
             for (svc, _) in &sessions {
-                eprintln!("  {}  →  localhost:{}", svc,
-                    args.routes.iter()
+                eprintln!(
+                    "  {}  →  localhost:{}",
+                    svc,
+                    args.routes
+                        .iter()
                         .find(|r| r.starts_with(&format!("{}:", svc)))
                         .and_then(|r| r.rsplit(':').next())
-                        .unwrap_or("?"));
+                        .unwrap_or("?")
+                );
             }
             eprintln!();
             eprintln!("  Status: connected");
@@ -124,15 +146,20 @@ pub async fn run(args: StartArgs) -> anyhow::Result<()> {
 }
 
 fn parse_route(s: &str) -> anyhow::Result<ServiceRoute> {
-    let colon = s.rfind(':')
+    let colon = s
+        .rfind(':')
         .ok_or_else(|| anyhow::anyhow!("invalid route {:?}: expected SERVICE:PORT", s))?;
     let service_name = s[..colon].to_string();
-    let local_port: u16 = s[colon + 1..].parse()
+    let local_port: u16 = s[colon + 1..]
+        .parse()
         .map_err(|_| anyhow::anyhow!("invalid port in route {:?}", s))?;
     if service_name.is_empty() {
         anyhow::bail!("service name is empty in route {:?}", s);
     }
-    Ok(ServiceRoute { service_name, local_port })
+    Ok(ServiceRoute {
+        service_name,
+        local_port,
+    })
 }
 
 fn now_rfc3339() -> String {

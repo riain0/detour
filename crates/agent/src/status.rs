@@ -7,31 +7,36 @@ use tracing::{info, warn};
 use detour_core::{ServiceRoute, SessionId, TunnelStatus};
 
 const DEFAULT_STATUS_PORT: u16 = 29876;
-const MAX_PORT_TRIES:       u16 = 10;
+const MAX_PORT_TRIES: u16 = 10;
 
 #[derive(Clone)]
 struct SessionEntry {
     session_id: SessionId,
-    route:      ServiceRoute,
-    status_rx:  watch::Receiver<TunnelStatus>,
+    route: ServiceRoute,
+    status_rx: watch::Receiver<TunnelStatus>,
 }
 
 #[derive(Clone)]
 struct AppState {
-    sessions:   Arc<Vec<SessionEntry>>,
+    sessions: Arc<Vec<SessionEntry>>,
     broker_url: String,
 }
 
 pub async fn serve(
-    sessions:   Vec<(SessionId, ServiceRoute, watch::Receiver<TunnelStatus>)>,
+    sessions: Vec<(SessionId, ServiceRoute, watch::Receiver<TunnelStatus>)>,
     broker_url: String,
 ) {
-    let entries: Vec<SessionEntry> = sessions.into_iter()
-        .map(|(session_id, route, status_rx)| SessionEntry { session_id, route, status_rx })
+    let entries: Vec<SessionEntry> = sessions
+        .into_iter()
+        .map(|(session_id, route, status_rx)| SessionEntry {
+            session_id,
+            route,
+            status_rx,
+        })
         .collect();
 
     let state = AppState {
-        sessions:   Arc::new(entries),
+        sessions: Arc::new(entries),
         broker_url,
     };
 
@@ -58,18 +63,24 @@ pub async fn serve(
 }
 
 async fn status_handler(State(state): State<AppState>) -> Json<Value> {
-    let sessions: Vec<Value> = state.sessions.iter().map(|e| {
-        let s = e.status_rx.borrow().clone();
-        let status_str = status_label(&s);
-        json!({
-            "service":    e.route.service_name,
-            "session_id": e.session_id.as_str(),
-            "port":       e.route.local_port,
-            "status":     status_str,
+    let sessions: Vec<Value> = state
+        .sessions
+        .iter()
+        .map(|e| {
+            let s = e.status_rx.borrow().clone();
+            let status_str = status_label(&s);
+            json!({
+                "service":    e.route.service_name,
+                "session_id": e.session_id.as_str(),
+                "port":       e.route.local_port,
+                "status":     status_str,
+            })
         })
-    }).collect();
+        .collect();
 
-    let overall = state.sessions.iter()
+    let overall = state
+        .sessions
+        .iter()
         .map(|e| e.status_rx.borrow().clone())
         .max_by_key(status_rank)
         .unwrap_or(TunnelStatus::Stopped);
@@ -84,21 +95,21 @@ async fn status_handler(State(state): State<AppState>) -> Json<Value> {
 
 fn status_label(s: &TunnelStatus) -> &'static str {
     match s {
-        TunnelStatus::Connecting   => "connecting",
-        TunnelStatus::Connected    => "connected",
+        TunnelStatus::Connecting => "connecting",
+        TunnelStatus::Connected => "connected",
         TunnelStatus::Reconnecting => "reconnecting",
-        TunnelStatus::Stopped      => "stopped",
-        TunnelStatus::Error(_)     => "error",
+        TunnelStatus::Stopped => "stopped",
+        TunnelStatus::Error(_) => "error",
     }
 }
 
 fn status_rank(s: &TunnelStatus) -> u8 {
     match s {
-        TunnelStatus::Connected    => 0,
+        TunnelStatus::Connected => 0,
         TunnelStatus::Reconnecting => 1,
-        TunnelStatus::Connecting   => 2,
-        TunnelStatus::Error(_)     => 3,
-        TunnelStatus::Stopped      => 4,
+        TunnelStatus::Connecting => 2,
+        TunnelStatus::Error(_) => 3,
+        TunnelStatus::Stopped => 4,
     }
 }
 
@@ -112,7 +123,10 @@ async fn find_available_port() -> u16 {
             return port;
         }
     }
-    warn!("all status ports in use, defaulting to {}", DEFAULT_STATUS_PORT);
+    warn!(
+        "all status ports in use, defaulting to {}",
+        DEFAULT_STATUS_PORT
+    );
     DEFAULT_STATUS_PORT
 }
 

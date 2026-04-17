@@ -95,13 +95,15 @@ async fn handle(
 
     let (grpc_tx, grpc_rx) = tokio::sync::mpsc::channel::<OutboundClientMsg>(64);
 
-    grpc_tx.send(OutboundClientMsg {
-        payload: Some(outbound_client_msg::Payload::Connect(OutboundConnect {
-            session_id: session_id.to_string(),
-            host:       host.clone(),
-            port:       port as u32,
-        })),
-    }).await?;
+    grpc_tx
+        .send(OutboundClientMsg {
+            payload: Some(outbound_client_msg::Payload::Connect(OutboundConnect {
+                session_id: session_id.to_string(),
+                host: host.clone(),
+                port: port as u32,
+            })),
+        })
+        .await?;
 
     let response = client.outbound_tunnel(ReceiverStream::new(grpc_rx)).await?;
     let mut inbound = response.into_inner();
@@ -111,7 +113,10 @@ async fn handle(
         Some(msg) => match msg.payload {
             Some(outbound_server_msg::Payload::Ack(ack)) if ack.success => {}
             Some(outbound_server_msg::Payload::Ack(ack)) => {
-                stream.write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await.ok();
+                stream
+                    .write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                    .await
+                    .ok();
                 anyhow::bail!("broker refused connection: {}", ack.error);
             }
             _ => anyhow::bail!("unexpected first message from broker"),
@@ -120,7 +125,9 @@ async fn handle(
     }
 
     // Send SOCKS5 success reply (BND.ADDR = 0.0.0.0, BND.PORT = 0)
-    stream.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
+    stream
+        .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+        .await?;
 
     // Bridge: SOCKS5 client ↔ broker gRPC stream
     let (mut socks_rx, mut socks_tx) = stream.into_split();
@@ -132,15 +139,21 @@ async fn handle(
         loop {
             match socks_rx.read(&mut buf).await {
                 Ok(0) | Err(_) => {
-                    let _ = grpc_tx2.send(OutboundClientMsg {
-                        payload: Some(outbound_client_msg::Payload::Fin(true)),
-                    }).await;
+                    let _ = grpc_tx2
+                        .send(OutboundClientMsg {
+                            payload: Some(outbound_client_msg::Payload::Fin(true)),
+                        })
+                        .await;
                     break;
                 }
                 Ok(n) => {
-                    if grpc_tx2.send(OutboundClientMsg {
-                        payload: Some(outbound_client_msg::Payload::Data(buf[..n].to_vec())),
-                    }).await.is_err() {
+                    if grpc_tx2
+                        .send(OutboundClientMsg {
+                            payload: Some(outbound_client_msg::Payload::Data(buf[..n].to_vec())),
+                        })
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -151,9 +164,12 @@ async fn handle(
     // gRPC → SOCKS5 client
     while let Some(msg) = inbound.message().await? {
         match msg.payload {
-            Some(outbound_server_msg::Payload::Data(data)) => {
-                if socks_tx.write_all(&data).await.is_err() { break; }
+            Some(outbound_server_msg::Payload::Data(data))
+                if socks_tx.write_all(&data).await.is_err() =>
+            {
+                break;
             }
+            Some(outbound_server_msg::Payload::Data(_)) => {}
             Some(outbound_server_msg::Payload::Fin(true)) | None => break,
             _ => {}
         }

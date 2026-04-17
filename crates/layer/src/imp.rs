@@ -16,18 +16,23 @@ const FAKE_BASE: u32 = (198 << 24) | (18 << 16);
 const FAKE_MASK: u32 = 0xFFFE_0000; // /15
 
 struct FakeIpTable {
-    next:       u32,
+    next: u32,
     ip_to_host: HashMap<u32, String>,
 }
 
 impl FakeIpTable {
     fn new() -> Self {
-        Self { next: 1, ip_to_host: HashMap::new() }
+        Self {
+            next: 1,
+            ip_to_host: HashMap::new(),
+        }
     }
 
     fn assign(&mut self, host: &str) -> u32 {
         for (&ip, h) in &self.ip_to_host {
-            if h == host { return ip; }
+            if h == host {
+                return ip;
+            }
         }
         let id = self.next;
         self.next = self.next.wrapping_add(1);
@@ -53,7 +58,7 @@ fn table() -> &'static Mutex<FakeIpTable> {
 
 // ── Real function pointers (resolved once via dlsym RTLD_NEXT) ────────────────
 
-type ConnectFn     = unsafe extern "C" fn(c_int, *const sockaddr, socklen_t) -> c_int;
+type ConnectFn = unsafe extern "C" fn(c_int, *const sockaddr, socklen_t) -> c_int;
 type GetaddrinfoFn = unsafe extern "C" fn(
     *const c_char,
     *const c_char,
@@ -61,12 +66,12 @@ type GetaddrinfoFn = unsafe extern "C" fn(
     *mut *mut libc::addrinfo,
 ) -> c_int;
 
-static REAL_CONNECT:     OnceLock<ConnectFn>     = OnceLock::new();
+static REAL_CONNECT: OnceLock<ConnectFn> = OnceLock::new();
 static REAL_GETADDRINFO: OnceLock<GetaddrinfoFn> = OnceLock::new();
 
 fn real_connect() -> ConnectFn {
     *REAL_CONNECT.get_or_init(|| unsafe {
-        let ptr = libc::dlsym(libc::RTLD_NEXT, b"connect\0".as_ptr() as *const c_char);
+        let ptr = libc::dlsym(libc::RTLD_NEXT, c"connect".as_ptr());
         assert!(!ptr.is_null(), "dlsym(RTLD_NEXT, connect) failed");
         std::mem::transmute(ptr)
     })
@@ -74,7 +79,7 @@ fn real_connect() -> ConnectFn {
 
 fn real_getaddrinfo() -> GetaddrinfoFn {
     *REAL_GETADDRINFO.get_or_init(|| unsafe {
-        let ptr = libc::dlsym(libc::RTLD_NEXT, b"getaddrinfo\0".as_ptr() as *const c_char);
+        let ptr = libc::dlsym(libc::RTLD_NEXT, c"getaddrinfo".as_ptr());
         assert!(!ptr.is_null(), "dlsym(RTLD_NEXT, getaddrinfo) failed");
         std::mem::transmute(ptr)
     })
@@ -90,10 +95,10 @@ fn real_getaddrinfo() -> GetaddrinfoFn {
 
 #[no_mangle]
 pub unsafe extern "C" fn getaddrinfo(
-    node:    *const c_char,
+    node: *const c_char,
     service: *const c_char,
-    hints:   *const libc::addrinfo,
-    res:     *mut *mut libc::addrinfo,
+    hints: *const libc::addrinfo,
+    res: *mut *mut libc::addrinfo,
 ) -> c_int {
     if node.is_null() || res.is_null() {
         return real_getaddrinfo()(node, service, hints, res);
@@ -157,8 +162,10 @@ pub unsafe extern "C" fn getaddrinfo(
 // Allocates an addrinfo + sockaddr_in via calloc so freeaddrinfo can free them.
 unsafe fn make_fake_addrinfo(fake_ip_be: u32) -> *mut libc::addrinfo {
     let sin = libc::calloc(1, std::mem::size_of::<sockaddr_in>()) as *mut sockaddr_in;
-    if sin.is_null() { return std::ptr::null_mut(); }
-    (*sin).sin_family    = AF_INET as _;
+    if sin.is_null() {
+        return std::ptr::null_mut();
+    }
+    (*sin).sin_family = AF_INET as _;
     (*sin).sin_addr.s_addr = fake_ip_be;
 
     let ai = libc::calloc(1, std::mem::size_of::<libc::addrinfo>()) as *mut libc::addrinfo;
@@ -166,11 +173,11 @@ unsafe fn make_fake_addrinfo(fake_ip_be: u32) -> *mut libc::addrinfo {
         libc::free(sin as *mut c_void);
         return std::ptr::null_mut();
     }
-    (*ai).ai_family   = AF_INET;
+    (*ai).ai_family = AF_INET;
     (*ai).ai_socktype = SOCK_STREAM;
     (*ai).ai_protocol = IPPROTO_TCP;
-    (*ai).ai_addrlen  = std::mem::size_of::<sockaddr_in>() as _;
-    (*ai).ai_addr     = sin as *mut sockaddr;
+    (*ai).ai_addrlen = std::mem::size_of::<sockaddr_in>() as _;
+    (*ai).ai_addr = sin as *mut sockaddr;
     ai
 }
 
@@ -182,8 +189,8 @@ unsafe fn make_fake_addrinfo(fake_ip_be: u32) -> *mut libc::addrinfo {
 
 #[no_mangle]
 pub unsafe extern "C" fn connect(
-    sockfd:  c_int,
-    addr:    *const sockaddr,
+    sockfd: c_int,
+    addr: *const sockaddr,
     addrlen: socklen_t,
 ) -> c_int {
     if addr.is_null() {
@@ -196,10 +203,12 @@ pub unsafe extern "C" fn connect(
     }
 
     // Only intercept TCP sockets
-    let mut sock_type: c_int  = 0;
+    let mut sock_type: c_int = 0;
     let mut optlen: socklen_t = std::mem::size_of::<c_int>() as socklen_t;
     let ok = libc::getsockopt(
-        sockfd, SOL_SOCKET, SO_TYPE,
+        sockfd,
+        SOL_SOCKET,
+        SO_TYPE,
         &mut sock_type as *mut c_int as *mut c_void,
         &mut optlen,
     );
@@ -207,8 +216,8 @@ pub unsafe extern "C" fn connect(
         return real_connect()(sockfd, addr, addrlen);
     }
 
-    let sin  = &*(addr as *const sockaddr_in);
-    let ip   = u32::from_be(sin.sin_addr.s_addr);
+    let sin = &*(addr as *const sockaddr_in);
+    let ip = u32::from_be(sin.sin_addr.s_addr);
     let port = u16::from_be(sin.sin_port);
 
     // Skip loopback and wildcard
@@ -231,7 +240,9 @@ pub unsafe extern "C" fn connect(
         Ok(proxy_fd) => {
             let result = libc::dup2(proxy_fd, sockfd);
             libc::close(proxy_fd);
-            if result == -1 { return -1; }
+            if result == -1 {
+                return -1;
+            }
             // Restore original non-blocking flag if it was set
             if orig_flags >= 0 && orig_flags & libc::O_NONBLOCK != 0 {
                 libc::fcntl(sockfd, libc::F_SETFL, orig_flags);
@@ -258,7 +269,10 @@ fn socks5_connect(host: &str, port: u16) -> std::io::Result<c_int> {
     let mut resp = [0u8; 2];
     proxy.read_exact(&mut resp)?;
     if resp != [0x05, 0x00] {
-        return Err(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "SOCKS5 auth rejected"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "SOCKS5 auth rejected",
+        ));
     }
 
     // CONNECT request (ATYP=hostname)
@@ -272,17 +286,28 @@ fn socks5_connect(host: &str, port: u16) -> std::io::Result<c_int> {
     let mut reply_hdr = [0u8; 4];
     proxy.read_exact(&mut reply_hdr)?;
     if reply_hdr[1] != 0x00 {
-        return Err(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "SOCKS5 CONNECT failed"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "SOCKS5 CONNECT failed",
+        ));
     }
     // Consume BND.ADDR + BND.PORT based on ATYP
     match reply_hdr[3] {
-        0x01 => { let mut b = [0u8; 6]; proxy.read_exact(&mut b)?; }  // IPv4 + port
+        0x01 => {
+            let mut b = [0u8; 6];
+            proxy.read_exact(&mut b)?;
+        } // IPv4 + port
         0x03 => {
-            let mut l = [0u8; 1]; proxy.read_exact(&mut l)?;
-            let mut b = vec![0u8; l[0] as usize + 2]; proxy.read_exact(&mut b)?;
+            let mut l = [0u8; 1];
+            proxy.read_exact(&mut l)?;
+            let mut b = vec![0u8; l[0] as usize + 2];
+            proxy.read_exact(&mut b)?;
         }
-        0x04 => { let mut b = [0u8; 18]; proxy.read_exact(&mut b)?; } // IPv6 + port
-        _    => {}
+        0x04 => {
+            let mut b = [0u8; 18];
+            proxy.read_exact(&mut b)?;
+        } // IPv6 + port
+        _ => {}
     }
 
     Ok(proxy.into_raw_fd())
@@ -290,7 +315,11 @@ fn socks5_connect(host: &str, port: u16) -> std::io::Result<c_int> {
 
 unsafe fn set_errno(e: c_int) {
     #[cfg(target_os = "linux")]
-    { *libc::__errno_location() = e; }
+    {
+        *libc::__errno_location() = e;
+    }
     #[cfg(target_os = "macos")]
-    { *libc::__error() = e; }
+    {
+        *libc::__error() = e;
+    }
 }

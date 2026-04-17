@@ -6,8 +6,7 @@ pub fn from_env() -> SidecarConfig {
     SidecarConfig {
         broker_url: env::var("DETOUR_BROKER_URL")
             .unwrap_or_else(|_| "http://localhost:50051".into()),
-        app_upstream: env::var("APP_UPSTREAM")
-            .unwrap_or_else(|_| "localhost:8080".into()),
+        app_upstream: env::var("APP_UPSTREAM").unwrap_or_else(|_| "localhost:8080".into()),
         auth_mode: env::var("DETOUR_AUTH_MODE")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -31,7 +30,6 @@ pub fn from_env() -> SidecarConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(10),
-        service_name: env::var("DETOUR_SERVICE_NAME")
-            .unwrap_or_default(),
+        service_name: env::var("DETOUR_SERVICE_NAME").unwrap_or_default(),
     }
 }

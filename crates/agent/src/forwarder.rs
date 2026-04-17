@@ -19,10 +19,13 @@ pub async fn forward(req: RelayRequest, local_port: u16, tx: mpsc::Sender<AgentM
         Ok((status, headers, body)) => {
             let response_msg = AgentMessage {
                 payload: Some(agent_message::Payload::Response(RelayResponse {
-                    request_id:  request_id.clone(),
+                    request_id: request_id.clone(),
                     status_code: status as u32,
-                    headers:     headers.into_iter().map(|(k, v)| Header { name: k, value: v }).collect(),
-                    body_chunk:  body.to_vec(),
+                    headers: headers
+                        .into_iter()
+                        .map(|(k, v)| Header { name: k, value: v })
+                        .collect(),
+                    body_chunk: body.to_vec(),
                     end_of_body: true,
                 })),
             };
@@ -32,10 +35,10 @@ pub async fn forward(req: RelayRequest, local_port: u16, tx: mpsc::Sender<AgentM
             error!(request_id = %request_id, error = %e, "forward failed");
             let response_msg = AgentMessage {
                 payload: Some(agent_message::Payload::Response(RelayResponse {
-                    request_id:  request_id,
+                    request_id,
                     status_code: 502,
-                    headers:     vec![],
-                    body_chunk:  b"Bad Gateway".to_vec(),
+                    headers: vec![],
+                    body_chunk: b"Bad Gateway".to_vec(),
                     end_of_body: true,
                 })),
             };
@@ -50,19 +53,16 @@ async fn do_forward(
 ) -> anyhow::Result<(u16, Vec<(String, String)>, Bytes)> {
     let uri = format!("http://127.0.0.1:{}{}", local_port, req.path);
 
-    let mut builder = Request::builder()
-        .method(req.method.as_str())
-        .uri(&uri);
+    let mut builder = Request::builder().method(req.method.as_str()).uri(&uri);
 
     for h in &req.headers {
         builder = builder.header(h.name.as_str(), h.value.as_str());
     }
 
-    let body  = Full::new(Bytes::from(req.body_chunk));
+    let body = Full::new(Bytes::from(req.body_chunk));
     let request = builder.body(body)?;
 
-    let client: Client<_, Full<Bytes>> =
-        Client::builder(TokioExecutor::new()).build_http();
+    let client: Client<_, Full<Bytes>> = Client::builder(TokioExecutor::new()).build_http();
 
     let response: Response<Incoming> = client.request(request).await?;
     let status = response.status().as_u16();

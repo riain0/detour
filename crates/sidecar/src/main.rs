@@ -39,23 +39,25 @@ async fn main() -> anyhow::Result<()> {
     }
     let channel = endpoint.connect_lazy();
 
-    let broker_client  = DetourClient::new(channel.clone());
-    let lookup_client  = DetourClient::new(channel);
-    let cache          = SessionCache::new(cfg.cache_ttl_secs);
-    let resolver       = Arc::new(CachedResolver::new(cache, lookup_client, cfg.service_name.clone()));
+    let broker_client = DetourClient::new(channel.clone());
+    let lookup_client = DetourClient::new(channel);
+    let cache = SessionCache::new(cfg.cache_ttl_secs);
+    let resolver = Arc::new(CachedResolver::new(
+        cache,
+        lookup_client,
+        cfg.service_name.clone(),
+    ));
 
     let state = ProxyState {
         resolver,
-        app_upstream:  cfg.app_upstream.clone(),
+        app_upstream: cfg.app_upstream.clone(),
         broker_client,
-        service_name:  cfg.service_name.clone(),
-        log_routed:    cfg.log_routed_requests,
-        max_body_mb:   cfg.max_body_size_mb,
+        service_name: cfg.service_name.clone(),
+        log_routed: cfg.log_routed_requests,
+        max_body_mb: cfg.max_body_size_mb,
     };
 
-    let app = Router::new()
-        .fallback(any(handler))
-        .with_state(state);
+    let app = Router::new().fallback(any(handler)).with_state(state);
 
     let addr: SocketAddr = format!("0.0.0.0:{}", cfg.listen_port).parse()?;
     info!(%addr, "HTTP listener ready");

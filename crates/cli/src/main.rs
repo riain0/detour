@@ -21,7 +21,7 @@ enum Command {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Start(args)  => commands::start::run(args).await,
+        Command::Start(args) => commands::start::run(args).await,
         Command::Status(args) => commands::status::run(args).await,
     }
 }

@@ -7,11 +7,14 @@ use tokio::sync::Mutex;
 
 use detour_core::{AuthMode, DetourError, ServiceRoute, SessionId, SessionRecord};
 
-
 #[async_trait]
 pub trait SessionRegistry: Send + Sync {
     async fn register(&self, record: SessionRecord) -> Result<(), DetourError>;
-    async fn lookup(&self, id: &SessionId, service_name: &str) -> Result<Option<SessionRecord>, DetourError>;
+    async fn lookup(
+        &self,
+        id: &SessionId,
+        service_name: &str,
+    ) -> Result<Option<SessionRecord>, DetourError>;
     async fn heartbeat(&self, id: &SessionId) -> Result<(), DetourError>;
     async fn expire(&self, id: &SessionId) -> Result<(), DetourError>;
 }
@@ -47,7 +50,11 @@ impl SessionRegistry for MemoryRegistry {
         Ok(())
     }
 
-    async fn lookup(&self, id: &SessionId, service_name: &str) -> Result<Option<SessionRecord>, DetourError> {
+    async fn lookup(
+        &self,
+        id: &SessionId,
+        service_name: &str,
+    ) -> Result<Option<SessionRecord>, DetourError> {
         let mut sessions = self.sessions.lock().await;
         let key = id.to_string();
         if let Some(record) = sessions.get(&key) {
@@ -56,7 +63,9 @@ impl SessionRegistry for MemoryRegistry {
                 sessions.remove(&key);
                 return Ok(None);
             }
-            if !service_name.is_empty() && !record.routes.iter().any(|r| r.service_name == service_name) {
+            if !service_name.is_empty()
+                && !record.routes.iter().any(|r| r.service_name == service_name)
+            {
                 return Ok(None);
             }
             Ok(Some(record.clone()))
@@ -85,7 +94,7 @@ impl SessionRegistry for MemoryRegistry {
 // ── Redis registry ────────────────────────────────────────────────────────────
 
 pub struct RedisRegistry {
-    client:   redis::Client,
+    client: redis::Client,
     ttl_secs: u64,
 }
 
@@ -127,21 +136,21 @@ impl SessionRegistry for RedisRegistry {
             .await
             .map_err(|e| DetourError::RegistryError(e.to_string()))?;
 
-        let key        = Self::key(&record.session_id);
+        let key = Self::key(&record.session_id);
         let routes_json = serde_json::to_string(&record.routes)
             .map_err(|e| DetourError::RegistryError(e.to_string()))?;
-        let now        = Self::now();
+        let now = Self::now();
 
         let _: () = redis::pipe()
             .hset_multiple(
                 &key,
                 &[
-                    ("connection_id",   record.connection_id.as_str()),
+                    ("connection_id", record.connection_id.as_str()),
                     ("broker_instance", record.broker_instance.as_str()),
-                    ("auth_mode",       record.auth_mode.to_string().as_str()),
-                    ("registered_at",   &now.to_string()),
-                    ("last_heartbeat",  &now.to_string()),
-                    ("routes",          routes_json.as_str()),
+                    ("auth_mode", record.auth_mode.to_string().as_str()),
+                    ("registered_at", &now.to_string()),
+                    ("last_heartbeat", &now.to_string()),
+                    ("routes", routes_json.as_str()),
                 ],
             )
             .expire(&key, self.ttl_secs as i64)
@@ -152,7 +161,11 @@ impl SessionRegistry for RedisRegistry {
         Ok(())
     }
 
-    async fn lookup(&self, id: &SessionId, service_name: &str) -> Result<Option<SessionRecord>, DetourError> {
+    async fn lookup(
+        &self,
+        id: &SessionId,
+        service_name: &str,
+    ) -> Result<Option<SessionRecord>, DetourError> {
         let mut conn = self
             .client
             .get_multiplexed_async_connection()
@@ -184,12 +197,18 @@ impl SessionRegistry for RedisRegistry {
         }
 
         Ok(Some(SessionRecord {
-            session_id:      id.clone(),
-            connection_id:   fields.get("connection_id").cloned().unwrap_or_default(),
+            session_id: id.clone(),
+            connection_id: fields.get("connection_id").cloned().unwrap_or_default(),
             broker_instance: fields.get("broker_instance").cloned().unwrap_or_default(),
             auth_mode,
-            registered_at:   fields.get("registered_at").and_then(|v| v.parse().ok()).unwrap_or(0),
-            last_heartbeat:  fields.get("last_heartbeat").and_then(|v| v.parse().ok()).unwrap_or(0),
+            registered_at: fields
+                .get("registered_at")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            last_heartbeat: fields
+                .get("last_heartbeat")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
             routes,
         }))
     }

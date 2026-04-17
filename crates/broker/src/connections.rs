@@ -27,7 +27,11 @@ impl ConnectionMap {
     }
 
     pub async fn get(&self, session_id: &SessionId) -> Option<TunnelTx> {
-        self.inner.lock().await.get(&session_id.to_string()).cloned()
+        self.inner
+            .lock()
+            .await
+            .get(&session_id.to_string())
+            .cloned()
     }
 }
 

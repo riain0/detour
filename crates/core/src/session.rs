@@ -49,7 +49,7 @@ pub enum AuthMode {
 impl fmt::Display for AuthMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AuthMode::SessionId   => f.write_str("session-id"),
+            AuthMode::SessionId => f.write_str("session-id"),
             AuthMode::SignedToken => f.write_str("signed-token"),
         }
     }
@@ -59,22 +59,22 @@ impl std::str::FromStr for AuthMode {
     type Err = crate::DetourError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "session-id"   => Ok(AuthMode::SessionId),
+            "session-id" => Ok(AuthMode::SessionId),
             "signed-token" => Ok(AuthMode::SignedToken),
-            other          => Err(crate::DetourError::InvalidAuthMode(other.to_string())),
+            other => Err(crate::DetourError::InvalidAuthMode(other.to_string())),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
-    pub session_id:      SessionId,
-    pub connection_id:   String,
+    pub session_id: SessionId,
+    pub connection_id: String,
     pub broker_instance: String,
-    pub auth_mode:       AuthMode,
-    pub registered_at:   u64,
-    pub last_heartbeat:  u64,
-    pub routes:          Vec<crate::ServiceRoute>,
+    pub auth_mode: AuthMode,
+    pub registered_at: u64,
+    pub last_heartbeat: u64,
+    pub routes: Vec<crate::ServiceRoute>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,11 +89,11 @@ pub enum TunnelStatus {
 impl fmt::Display for TunnelStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TunnelStatus::Connecting   => f.write_str("connecting"),
-            TunnelStatus::Connected    => f.write_str("connected"),
+            TunnelStatus::Connecting => f.write_str("connecting"),
+            TunnelStatus::Connected => f.write_str("connected"),
             TunnelStatus::Reconnecting => f.write_str("reconnecting"),
-            TunnelStatus::Stopped      => f.write_str("stopped"),
-            TunnelStatus::Error(msg)   => write!(f, "error: {}", msg),
+            TunnelStatus::Stopped => f.write_str("stopped"),
+            TunnelStatus::Error(msg) => write!(f, "error: {}", msg),
         }
     }
 }

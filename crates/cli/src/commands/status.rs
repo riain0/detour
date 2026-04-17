@@ -15,13 +15,22 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
     match resp {
         Ok(r) => {
             let body: serde_json::Value = r.json().await?;
-            let status = body.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let status = body
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
 
             if status == "connected" {
-                let session_id = body.get("session_id").and_then(|v| v.as_str()).unwrap_or("-");
-                let service    = body.get("service").and_then(|v| v.as_str()).unwrap_or("-");
-                let port       = body.get("port").and_then(|v| v.as_u64()).unwrap_or(0);
-                let broker_url = body.get("broker_url").and_then(|v| v.as_str()).unwrap_or("-");
+                let session_id = body
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-");
+                let service = body.get("service").and_then(|v| v.as_str()).unwrap_or("-");
+                let port = body.get("port").and_then(|v| v.as_u64()).unwrap_or(0);
+                let broker_url = body
+                    .get("broker_url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-");
 
                 println!("Status:     connected");
                 println!("Session ID: {}", session_id);

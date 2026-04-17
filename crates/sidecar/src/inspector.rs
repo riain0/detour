@@ -17,14 +17,22 @@ pub trait SessionResolver: Send + Sync {
 }
 
 pub struct CachedResolver {
-    cache:            SessionCache,
-    client:           DetourClient<Channel>,
+    cache: SessionCache,
+    client: DetourClient<Channel>,
     expected_service: String,
 }
 
 impl CachedResolver {
-    pub fn new(cache: SessionCache, client: DetourClient<Channel>, expected_service: String) -> Self {
-        Self { cache, client, expected_service }
+    pub fn new(
+        cache: SessionCache,
+        client: DetourClient<Channel>,
+        expected_service: String,
+    ) -> Self {
+        Self {
+            cache,
+            client,
+            expected_service,
+        }
     }
 }
 
@@ -50,7 +58,7 @@ impl SessionResolver for CachedResolver {
         let mut client = self.client.clone();
         match client
             .lookup_session(LookupRequest {
-                session_id:   sid.to_string(),
+                session_id: sid.to_string(),
                 service_name: self.expected_service.clone(),
             })
             .await
@@ -61,13 +69,16 @@ impl SessionResolver for CachedResolver {
                     return None;
                 }
                 let record = detour_core::SessionRecord {
-                    session_id:      sid.clone(),
-                    connection_id:   String::new(),
+                    session_id: sid.clone(),
+                    connection_id: String::new(),
                     broker_instance: String::new(),
-                    auth_mode:       r.auth_mode.parse().unwrap_or(detour_core::AuthMode::SessionId),
-                    registered_at:   0,
-                    last_heartbeat:  0,
-                    routes:          vec![],
+                    auth_mode: r
+                        .auth_mode
+                        .parse()
+                        .unwrap_or(detour_core::AuthMode::SessionId),
+                    registered_at: 0,
+                    last_heartbeat: 0,
+                    routes: vec![],
                 };
                 self.cache.insert(record.clone()).await;
                 Some(record)

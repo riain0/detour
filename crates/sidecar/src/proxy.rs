@@ -17,12 +17,12 @@ use crate::inspector::SessionResolver;
 
 #[derive(Clone)]
 pub struct ProxyState {
-    pub resolver:      Arc<dyn SessionResolver>,
-    pub app_upstream:  String,
+    pub resolver: Arc<dyn SessionResolver>,
+    pub app_upstream: String,
     pub broker_client: DetourClient<Channel>,
-    pub service_name:  String,
-    pub log_routed:    bool,
-    pub max_body_mb:   u64,
+    pub service_name: String,
+    pub log_routed: bool,
+    pub max_body_mb: u64,
 }
 
 pub async fn handler(State(state): State<ProxyState>, req: Request) -> impl IntoResponse {
@@ -44,7 +44,7 @@ pub async fn handler(State(state): State<ProxyState>, req: Request) -> impl Into
             // Collect body (with size guard)
             let max_bytes = state.max_body_mb * 1024 * 1024;
             let body_bytes = match collect_limited(body, max_bytes).await {
-                Ok(b)  => b,
+                Ok(b) => b,
                 Err(e) => {
                     warn!(error = %e, "request body too large or read error");
                     return Response::builder()
@@ -64,21 +64,23 @@ pub async fn handler(State(state): State<ProxyState>, req: Request) -> impl Into
             }
 
             let request_id = uuid::Uuid::new_v4().to_string();
-            let headers: Vec<Header> = parts.headers.iter()
+            let headers: Vec<Header> = parts
+                .headers
+                .iter()
                 .map(|(k, v)| Header {
-                    name:  k.to_string(),
+                    name: k.to_string(),
                     value: v.to_str().unwrap_or("").to_string(),
                 })
                 .collect();
 
             let chunks = vec![RelayRequestMsg {
-                request_id:   request_id.clone(),
-                session_id:   record.session_id.to_string(),
-                method:       parts.method.to_string(),
-                path:         parts.uri.to_string(),
+                request_id: request_id.clone(),
+                session_id: record.session_id.to_string(),
+                method: parts.method.to_string(),
+                path: parts.uri.to_string(),
                 headers,
-                body_chunk:   body_bytes.to_vec(),
-                end_of_body:  true,
+                body_chunk: body_bytes.to_vec(),
+                end_of_body: true,
                 service_name: state.service_name.clone(),
             }];
 
@@ -107,12 +109,10 @@ pub async fn handler(State(state): State<ProxyState>, req: Request) -> impl Into
     }
 }
 
-async fn passthrough(
-    parts:    &http::request::Parts,
-    body:     Bytes,
-    upstream: &str,
-) -> Response<Body> {
-    let path = parts.uri.path_and_query()
+async fn passthrough(parts: &http::request::Parts, body: Bytes, upstream: &str) -> Response<Body> {
+    let path = parts
+        .uri
+        .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or("/");
     let uri = if upstream.starts_with("http://") || upstream.starts_with("https://") {
@@ -121,17 +121,14 @@ async fn passthrough(
         format!("http://{}{}", upstream, path)
     };
 
-    let client = reqwest::Client::builder()
-        .build()
-        .unwrap();
+    let client = reqwest::Client::builder().build().unwrap();
 
-    let mut req = client.request(
-        parts.method.clone().into(),
-        &uri,
-    ).body(body);
+    let mut req = client.request(parts.method.clone(), &uri).body(body);
 
     for (k, v) in &parts.headers {
-        if k == "host" { continue; }
+        if k == "host" {
+            continue;
+        }
         req = req.header(k, v);
     }
 
@@ -155,7 +152,8 @@ async fn passthrough(
 }
 
 async fn collect_body(body: Body) -> Bytes {
-    body.collect().await
+    body.collect()
+        .await
         .map(|b| b.to_bytes())
         .unwrap_or_default()
 }
