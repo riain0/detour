@@ -41,21 +41,17 @@ impl SessionResolver for CachedResolver {
 
         let sid = SessionId::from_string(raw.to_lowercase()).ok()?;
 
-        // Fast path: in-memory cache hit
+        // Fast path: in-memory cache hit (already validated when inserted)
         if let Some(record) = self.cache.get(&sid).await {
-            if !self.expected_service.is_empty()
-                && record.service_name != self.expected_service
-            {
-                return None;
-            }
             return Some(record);
         }
 
-        // Slow path: broker LookupSession RPC
+        // Slow path: broker LookupSession RPC — broker validates service_name
         let mut client = self.client.clone();
         match client
             .lookup_session(LookupRequest {
-                session_id: sid.to_string(),
+                session_id:   sid.to_string(),
+                service_name: self.expected_service.clone(),
             })
             .await
         {
@@ -68,22 +64,11 @@ impl SessionResolver for CachedResolver {
                     session_id:      sid.clone(),
                     connection_id:   String::new(),
                     broker_instance: String::new(),
-                    service_name:    r.service_name,
                     auth_mode:       r.auth_mode.parse().unwrap_or(detour_core::AuthMode::SessionId),
                     registered_at:   0,
                     last_heartbeat:  0,
-                    allowed_services: vec![],
+                    routes:          vec![],
                 };
-                if !self.expected_service.is_empty()
-                    && record.service_name != self.expected_service
-                {
-                    warn!(
-                        session_service = %record.service_name,
-                        expected        = %self.expected_service,
-                        "session service mismatch, passing through"
-                    );
-                    return None;
-                }
                 self.cache.insert(record.clone()).await;
                 Some(record)
             }

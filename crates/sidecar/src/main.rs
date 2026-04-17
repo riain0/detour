@@ -48,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
         resolver,
         app_upstream:  cfg.app_upstream.clone(),
         broker_client,
+        service_name:  cfg.service_name.clone(),
         log_routed:    cfg.log_routed_requests,
         max_body_mb:   cfg.max_body_size_mb,
     };

@@ -1,0 +1,12 @@
+[package]
+name    = "detour-layer"
+version = "0.1.0"
+edition = "2021"
+
+# Build as a shared library for LD_PRELOAD / DYLD_INSERT_LIBRARIES injection.
+# On non-unix platforms this crate compiles as an empty lib (LD_PRELOAD is unix-only).
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

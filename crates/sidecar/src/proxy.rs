@@ -17,11 +17,12 @@ use crate::inspector::SessionResolver;
 
 #[derive(Clone)]
 pub struct ProxyState {
-    pub resolver:     Arc<dyn SessionResolver>,
-    pub app_upstream: String,
+    pub resolver:      Arc<dyn SessionResolver>,
+    pub app_upstream:  String,
     pub broker_client: DetourClient<Channel>,
-    pub log_routed:   bool,
-    pub max_body_mb:  u64,
+    pub service_name:  String,
+    pub log_routed:    bool,
+    pub max_body_mb:   u64,
 }
 
 pub async fn handler(State(state): State<ProxyState>, req: Request) -> impl IntoResponse {
@@ -71,13 +72,14 @@ pub async fn handler(State(state): State<ProxyState>, req: Request) -> impl Into
                 .collect();
 
             let chunks = vec![RelayRequestMsg {
-                request_id:  request_id.clone(),
-                session_id:  record.session_id.to_string(),
-                method:      parts.method.to_string(),
-                path:        parts.uri.to_string(),
+                request_id:   request_id.clone(),
+                session_id:   record.session_id.to_string(),
+                method:       parts.method.to_string(),
+                path:         parts.uri.to_string(),
                 headers,
-                body_chunk:  body_bytes.to_vec(),
-                end_of_body: true,
+                body_chunk:   body_bytes.to_vec(),
+                end_of_body:  true,
+                service_name: state.service_name.clone(),
             }];
 
             let stream = tokio_stream::iter(chunks);

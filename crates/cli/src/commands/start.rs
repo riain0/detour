@@ -22,6 +22,10 @@ pub struct StartArgs {
     /// Auth mode: "session-id" or "signed-token"
     #[arg(long, default_value = "session-id")]
     pub auth_mode: String,
+
+    /// Local port for the outbound SOCKS5 proxy (set LD_PRELOAD + DETOUR_SOCKS5_PORT to use)
+    #[arg(long, default_value = "1081")]
+    pub socks5_port: u16,
 }
 
 pub async fn run(args: StartArgs) -> anyhow::Result<()> {
@@ -37,9 +41,10 @@ pub async fn run(args: StartArgs) -> anyhow::Result<()> {
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     let config = AgentConfig {
-        broker_url: args.broker.clone(),
+        broker_url:  args.broker.clone(),
         routes,
         auth_mode,
+        socks5_port: args.socks5_port,
     };
 
     let handle = AgentHandle::start(config).await
@@ -80,13 +85,22 @@ pub async fn run(args: StartArgs) -> anyhow::Result<()> {
         println!("{}", event);
         if !connected { anyhow::bail!("failed to connect to broker"); }
     } else if connected {
-        eprintln!();
-        for (svc, sid) in &sessions {
-            eprintln!("  {}  →  X-Route-To: {}", svc, sid);
+        // All sessions share the same session_id — print it once
+        if let Some((_, sid)) = sessions.first() {
+            eprintln!();
+            eprintln!("  X-Route-To: {}", sid);
+            eprintln!();
+            for (svc, _) in &sessions {
+                eprintln!("  {}  →  localhost:{}", svc,
+                    args.routes.iter()
+                        .find(|r| r.starts_with(&format!("{}:", svc)))
+                        .and_then(|r| r.rsplit(':').next())
+                        .unwrap_or("?"));
+            }
+            eprintln!();
+            eprintln!("  Status: connected");
+            eprintln!();
         }
-        eprintln!();
-        eprintln!("  Status: connected");
-        eprintln!();
     } else {
         anyhow::bail!("failed to connect to broker — check broker URL and network");
     }

@@ -1,94 +1,91 @@
 # detour
 
-Route live cloud traffic to your local machine. No VPN, no SSH tunnels, no changes to your app container.
+Route live cloud traffic to your local machine. No VPN, no SSH tunnels, no changes to your app code.
 
-Detour adds a sidecar to your cloud service that inspects HTTP headers. Requests with an `X-Route-To` header are relayed through a gRPC tunnel to your machine. Everything else passes straight through to your app with zero overhead.
-
-Works with Cloud Run, AWS Fargate, or any HTTP service you can put a sidecar in front of.
-
-## How it works
+Detour adds a lightweight sidecar to your cloud service. Requests that include an `X-Route-To` header are relayed through an outbound tunnel to your machine. Everyone else hits the normal cloud app.
 
 ```
 Browser / curl
   │
   ▼
 detour-sidecar  (:8081, ingress)
-  ├─ no X-Route-To header  ──────────────────────▶  your app container  (:8080)
+  ├─ no X-Route-To header  ──────────────────────▶  your app  (:8080)
   └─ X-Route-To: <session> ──▶  detour-broker  ──▶  detour agent  ──▶  localhost:3000
                                   (gRPC relay)         (your machine)
 ```
 
-`detour-sidecar` runs alongside your app container and is invisible to clients the service URL does not change. `detour-broker` is a small gRPC relay server deployed once per team. `detour start` runs on your machine and opens an outbound tunnel to the broker no inbound ports or firewall rules required.
+## Who does what
 
-## Installation
+**Platform / ops team** — set up once per environment:
+- Deploy the broker (one instance, shared by the team)
+- Add the sidecar container to each service you want to be routable
+- Set `DETOUR_SERVICE_NAME` on each sidecar so sessions can't be cross-routed
 
-Pre-built binaries for Linux and macOS are on the [releases page](https://github.com/riain0/detour/releases).
+**Developer** — on their machine:
+- Run `detour start` (or use the VS Code extension)
+- Copy the printed `X-Route-To` header
+- Add it to requests in their browser, Postman, or any HTTP client
 
-```bash
-# macOS (Apple Silicon)
-curl -L https://github.com/riain0/detour/releases/latest/download/detour-latest-aarch64-apple-darwin.tar.gz | tar xz
-sudo mv detour /usr/local/bin/
-```
+No firewall rules, no inbound ports. The agent makes an outbound connection to the broker.
 
-To build from source (requires Rust 1.75+):
+---
 
-```bash
-git clone https://github.com/riain0/detour
-cd detour
-cargo install --path crates/cli
-```
+## Platform team: deploying the broker
 
-## Quick start
-
-**1. Deploy the broker** (once per team / environment see [IaC](#deploying-with-iac)):
+The broker is a small gRPC relay server. Deploy it once and share it across services.
 
 ```bash
 docker run -p 50051:50051 ghcr.io/riain0/detour-broker:latest
 ```
 
-**2. Add the sidecar** to your service (see [IaC](#deploying-with-iac) for Terraform snippets).
-
-**3. Start routing to your machine:**
+**With Redis (recommended)** — sessions survive broker restarts and the broker logs which backend it is using at startup:
 
 ```bash
-detour start --route my-api:3000 --broker https://broker.example.com
+docker run -p 50051:50051 \
+  -e REDIS_URL=redis://your-redis:6379 \
+  ghcr.io/riain0/detour-broker:latest
 ```
 
-```
-  Detour v0.1.0
-  Connecting to https://broker.example.com ...
+Without Redis the broker falls back to in-memory automatically.
 
-  my-api  →  X-Route-To: a3f8c2d1-9e4b-4f1a-8c7d-2b5e6f0a1c3d  →  localhost:3000
+### Broker configuration
 
-  Status: connected
-```
+| Env var | Default | Description |
+|---|---|---|
+| `PORT` | `8080` | gRPC listen port |
+| `REDIS_URL` | `redis://127.0.0.1:6379` | Session storage. Falls back to in-memory if unreachable |
+| `DETOUR_SESSION_TTL_SECS` | `28800` | Session lifetime in seconds (8h) |
+| `DETOUR_AUTH_MODE` | `session-id` | `session-id` or `signed-token` |
 
-Add the printed header to your requests and they will be routed to `localhost:3000` on your machine:
+### Broker IaC
 
-```bash
-curl -H "X-Route-To: a3f8c2d1-9e4b-4f1a-8c7d-2b5e6f0a1c3d" https://my-service.example.com/api/orders
-```
+Terraform snippets are in [`deploy/terraform/`](deploy/terraform/).
 
-**4. Route multiple services at once:**
+**GCP Cloud Run** — [`deploy/terraform/gcp/broker.tf`](deploy/terraform/gcp/broker.tf)
 
-```bash
-detour start \
-  --route payments-api:3001 \
-  --route user-api:3002 \
-  --broker https://broker.example.com
-```
+**AWS Fargate** — [`deploy/terraform/aws/broker.tf`](deploy/terraform/aws/broker.tf) (requires an ACM certificate — ALB needs HTTPS for gRPC)
 
-Each route gets its own session ID and tunnel.
+---
 
-## Deploying with IaC
+## Platform team: adding the sidecar
 
-Terraform snippets for adding detour to an existing service are in [`deploy/terraform/`](deploy/terraform/).
+The sidecar runs alongside your app container and intercepts matching requests. Your service URL does not change.
 
-### GCP Cloud Run
+Set `DETOUR_SERVICE_NAME` to the same name developers will use when starting the agent. This prevents sessions registered for `payments-api` from accidentally routing to a `user-api` sidecar.
 
-**Deploy the broker** add [`deploy/terraform/gcp/broker.tf`](deploy/terraform/gcp/broker.tf) to your dev environment config.
+### Sidecar configuration
 
-**Add the sidecar** two additions to your existing `google_cloud_run_v2_service` from [`deploy/terraform/gcp/sidecar.tf`](deploy/terraform/gcp/sidecar.tf):
+| Env var | Default | Description |
+|---|---|---|
+| `DETOUR_BROKER_URL` | `http://localhost:50051` | Broker address |
+| `APP_UPSTREAM` | `localhost:8080` | App container address |
+| `DETOUR_LISTEN_PORT` / `PORT` | `8000` | Sidecar listen port |
+| `DETOUR_SERVICE_NAME` | `""` | Only route sessions registered under this name |
+| `DETOUR_AUTH_MODE` | `session-id` | Must match the broker |
+
+### Sidecar IaC
+
+**GCP Cloud Run** — add to your existing `google_cloud_run_v2_service` from [`deploy/terraform/gcp/sidecar.tf`](deploy/terraform/gcp/sidecar.tf):
 
 ```hcl
 # 1. Make your existing ports block conditional
@@ -113,14 +110,9 @@ dynamic "containers" {
 
 Also set `execution_environment = "EXECUTION_ENVIRONMENT_GEN2"` on your template (required for multi-container).
 
-### AWS Fargate
-
-**Deploy the broker** add [`deploy/terraform/aws/broker.tf`](deploy/terraform/aws/broker.tf). Requires an ACM certificate ALB needs HTTPS for gRPC.
-
-**Add the sidecar** two changes to your task definition and target group from [`deploy/terraform/aws/sidecar.tf`](deploy/terraform/aws/sidecar.tf):
+**AWS Fargate** — [`deploy/terraform/aws/sidecar.tf`](deploy/terraform/aws/sidecar.tf):
 
 ```hcl
-# 1. Add the sidecar to container_definitions
 container_definitions = jsonencode(concat(
   [{ name = "app", ... }],
   var.detour_enabled ? [{
@@ -136,70 +128,77 @@ container_definitions = jsonencode(concat(
   }] : []
 ))
 
-# 2. Point the load balancer at the sidecar port when enabled
 resource "aws_lb_target_group" "app" {
   port = var.detour_enabled ? 8081 : 8080
 }
 ```
 
-In both cases, set `detour_enabled = false` in prod the sidecar is never deployed and your service is unchanged.
+Set `detour_enabled = false` in production — the sidecar is never deployed and your service is unchanged.
 
-## Docker images
+---
 
-Published to GHCR on every release:
+## Developer: routing traffic to your machine
 
-| Image | Description |
-|---|---|
-| `ghcr.io/riain0/detour-broker:latest` | gRPC relay broker |
-| `ghcr.io/riain0/detour-sidecar:latest` | HTTP sidecar proxy |
+### Installation
 
-Tags: `latest` and `vX.Y.Z` for pinned versions.
+Pre-built binaries for Linux and macOS are on the [releases page](https://github.com/riain0/detour/releases).
 
-## Configuration
+**macOS (Apple Silicon):**
+```bash
+curl -L https://github.com/riain0/detour/releases/latest/download/detour-latest-aarch64-apple-darwin.tar.gz | tar xz
+sudo mv detour /usr/local/bin/
+```
 
-### Broker
+**VS Code extension** — install Detour from the marketplace. The extension downloads the CLI automatically on first use (macOS and Linux).
 
-| Env var | Default | Description |
-|---|---|---|
-| `PORT` | `8080` | gRPC listen port |
-| `REDIS_URL` | `redis://127.0.0.1:6379` | Session storage. Falls back to in-memory if unreachable |
-| `DETOUR_SESSION_TTL_SECS` | `28800` | Session lifetime (8h) |
-| `DETOUR_AUTH_MODE` | `session-id` | `session-id` or `signed-token` |
+**From source** (requires Rust 1.75+):
+```bash
+cargo install --path crates/cli
+```
 
-### Sidecar
+### Starting a session
 
-| Env var | Default | Description |
-|---|---|---|
-| `DETOUR_BROKER_URL` | `http://localhost:50051` | Broker address |
-| `APP_UPSTREAM` | `localhost:8080` | App container address |
-| `DETOUR_LISTEN_PORT` / `PORT` | `8000` | Sidecar listen port |
-| `DETOUR_SERVICE_NAME` | `""` | If set, only routes sessions registered under this service name |
-| `DETOUR_AUTH_MODE` | `session-id` | Must match the broker |
+```bash
+detour start --route my-api:3000 --broker https://broker.example.com
+```
 
-### CLI
+```
+  Detour v0.1.0
+  Connecting to https://broker.example.com ...
+
+  my-api  →  X-Route-To: a3f8c2d1-9e4b-4f1a-8c7d-2b5e6f0a1c3d  →  localhost:3000
+
+  Status: connected
+```
+
+Add the printed header to your requests:
+
+```bash
+curl -H "X-Route-To: a3f8c2d1-9e4b-4f1a-8c7d-2b5e6f0a1c3d" https://my-service.example.com/api/orders
+```
+
+That request is relayed through the broker to `localhost:3000` on your machine. Everyone else hits the normal cloud app.
+
+### Multiple services
+
+```bash
+detour start \
+  --route payments-api:3001 \
+  --route user-api:3002 \
+  --broker https://broker.example.com
+```
+
+Each route gets its own session ID and independent tunnel.
+
+### CLI reference
 
 | Flag | Env var | Default | Description |
 |---|---|---|---|
-| `--route SERVICE:PORT` | | | Service name and local port to forward to. Repeatable |
+| `--route SERVICE:PORT` | | | Service name and local port. Repeatable |
 | `--broker URL` | `DETOUR_BROKER_URL` | `http://localhost:50051` | Broker URL |
-| `--auth-mode` | | `session-id` | `session-id` or `signed-token` |
-| `--output` | | `human` | `human` or `json` |
+| `--output` | | `human` | `human` or `json` (for tooling integrations) |
 
-## Service name validation
-
-The sidecar can be scoped to a specific service by setting `DETOUR_SERVICE_NAME`. When set, session IDs registered under a different service name are rejected and the request falls through to your app preventing an agent for `payments-api` from accidentally receiving traffic intended for `user-api`.
-
-```bash
-# Agent registered as "payments-api"
-detour start --route payments-api:3001 --broker https://broker.example.com
-
-# Only the sidecar with DETOUR_SERVICE_NAME=payments-api will route this session
-# A sidecar with DETOUR_SERVICE_NAME=user-api will pass it through
-```
-
-## Status endpoint
-
-The agent exposes a local status endpoint on port 29876:
+### Local status
 
 ```bash
 curl http://localhost:29876/status
@@ -217,18 +216,18 @@ curl http://localhost:29876/status
 }
 ```
 
-## JSON output
+---
 
-`detour start --output json` emits newline-delimited JSON, useful for IDE and browser extension integrations:
+## Docker images
 
-```json
-{"event":"ready","ts":"1712345678Z","sessions":[{"service":"my-api","session_id":"..."}],"broker_url":"https://..."}
-{"event":"status","ts":"...","status":"stopped"}
-```
+Published to GHCR on every release:
 
-## Session storage
+| Image | Description |
+|---|---|
+| `ghcr.io/riain0/detour-broker:latest` | gRPC relay broker |
+| `ghcr.io/riain0/detour-sidecar:latest` | HTTP sidecar proxy |
 
-The broker uses Redis when available (recommended sessions survive restarts) and falls back to in-memory automatically. It logs which backend it is using at startup.
+Tags: `latest` and `vX.Y.Z` for pinned versions.
 
 ## License
 

@@ -64,7 +64,8 @@ pub struct ServiceRoute {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
-    pub broker_url: String,
-    pub routes:     Vec<ServiceRoute>,
-    pub auth_mode:  AuthMode,
+    pub broker_url:  String,
+    pub routes:      Vec<ServiceRoute>,
+    pub auth_mode:   AuthMode,
+    pub socks5_port: u16,
 }

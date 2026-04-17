@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use tokio::sync::{oneshot, watch};
@@ -8,17 +9,17 @@ use tracing::{info, warn};
 use detour_core::{AuthMode, ServiceRoute, SessionId, TunnelStatus};
 use detour_proto::detour::{
     agent_message, broker_message, detour_client::DetourClient, AgentMessage, Heartbeat,
-    RegisterSession,
+    RegisterSession, RouteEntry,
 };
 
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
-const RECONNECT_DELAY:    Duration = Duration::from_secs(3);
+const HEARTBEAT_INTERVAL:  Duration = Duration::from_secs(30);
+const RECONNECT_DELAY:     Duration = Duration::from_secs(3);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
 
 pub async fn run(
     broker_url:  String,
     auth_mode:   AuthMode,
-    route:       ServiceRoute,
+    routes:      Vec<ServiceRoute>,
     session_id:  SessionId,
     status_tx:   watch::Sender<TunnelStatus>,
     shutdown_rx: oneshot::Receiver<()>,
@@ -29,7 +30,7 @@ pub async fn run(
     loop {
         let _ = status_tx.send(TunnelStatus::Connecting);
 
-        match connect_and_run(&broker_url, &auth_mode, &route, &session_id, &status_tx).await {
+        match connect_and_run(&broker_url, &auth_mode, &routes, &session_id, &status_tx).await {
             Ok(()) => {
                 let _ = status_tx.send(TunnelStatus::Stopped);
                 return;
@@ -55,7 +56,7 @@ pub async fn run(
 async fn connect_and_run(
     broker_url: &str,
     auth_mode:  &AuthMode,
-    route:      &ServiceRoute,
+    routes:     &[ServiceRoute],
     session_id: &SessionId,
     status_tx:  &watch::Sender<TunnelStatus>,
 ) -> anyhow::Result<()> {
@@ -77,12 +78,18 @@ async fn connect_and_run(
 
     let (tx, rx) = tokio::sync::mpsc::channel::<AgentMessage>(64);
 
+    let proto_routes: Vec<RouteEntry> = routes.iter()
+        .map(|r| RouteEntry {
+            service_name: r.service_name.clone(),
+            local_port:   r.local_port as u32,
+        })
+        .collect();
+
     tx.send(AgentMessage {
         payload: Some(agent_message::Payload::Register(RegisterSession {
-            session_id:       session_id.to_string(),
-            auth_mode:        auth_mode.to_string(),
-            service_name:     route.service_name.clone(),
-            allowed_services: vec![route.service_name.clone()],
+            session_id: session_id.to_string(),
+            auth_mode:  auth_mode.to_string(),
+            routes:     proto_routes,
         })),
     })
     .await?;
@@ -97,6 +104,11 @@ async fn connect_and_run(
 
     let _ = status_tx.send(TunnelStatus::Connected);
     info!(session_id = %session_id, "tunnel connected");
+
+    // Build service_name → local_port map for request dispatch
+    let route_map: HashMap<String, u16> = routes.iter()
+        .map(|r| (r.service_name.clone(), r.local_port))
+        .collect();
 
     let session_id_str = session_id.to_string();
     let tx_hb = tx.clone();
@@ -116,13 +128,19 @@ async fn connect_and_run(
         }
     });
 
-    let local_port = route.local_port;
     while let Some(msg) = inbound.message().await? {
         match msg.payload {
             Some(broker_message::Payload::Ack(ack)) => {
                 info!(session_id = %ack.session_id, ttl = ack.ttl, "session acknowledged");
             }
             Some(broker_message::Payload::Request(req)) => {
+                let local_port = match route_map.get(&req.service_name) {
+                    Some(&p) => p,
+                    None => {
+                        warn!(service = %req.service_name, "no route for service, dropping request");
+                        continue;
+                    }
+                };
                 let tx_resp = tx.clone();
                 tokio::spawn(async move {
                     crate::forwarder::forward(req, local_port, tx_resp).await;

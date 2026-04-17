@@ -11,6 +11,9 @@ service Detour {
 
     // Sidecar calls this on session cache miss
     rpc LookupSession(LookupRequest) returns (LookupResponse);
+
+    // Agent calls this to forward an outbound TCP connection through the broker
+    rpc OutboundTunnel(stream OutboundClientMsg) returns (stream OutboundServerMsg);
 }
 
 // ── Agent → Broker ────────────────────────────────────────────────────────────
@@ -23,11 +26,15 @@ message AgentMessage {
     }
 }
 
+message RouteEntry {
+    string service_name = 1;
+    uint32 local_port   = 2;
+}
+
 message RegisterSession {
-    string session_id       = 1;
-    string auth_mode        = 2; // "session-id" | "signed-token"
-    string service_name     = 3;
-    repeated string allowed_services = 4;
+    string session_id          = 1;
+    string auth_mode           = 2;
+    repeated RouteEntry routes = 3;
 }
 
 message Heartbeat {
@@ -53,7 +60,7 @@ message BrokerMessage {
 
 message SessionAck {
     string session_id = 1;
-    uint64 ttl        = 2; // seconds
+    uint64 ttl        = 2;
 }
 
 message RelayRequest {
@@ -63,6 +70,7 @@ message RelayRequest {
     repeated Header headers = 4;
     bytes  body_chunk       = 5;
     bool   end_of_body      = 6;
+    string service_name     = 7;
 }
 
 // ── Relay RPCs (sidecar ↔ broker) ────────────────────────────────────────────
@@ -75,6 +83,7 @@ message RelayRequestMsg {
     repeated Header headers = 5;
     bytes  body_chunk       = 6;
     bool   end_of_body      = 7;
+    string service_name     = 8;
 }
 
 message RelayResponseMsg {
@@ -88,13 +97,42 @@ message RelayResponseMsg {
 // ── Session lookup (sidecar cache miss) ──────────────────────────────────────
 
 message LookupRequest {
-    string session_id = 1;
+    string session_id   = 1;
+    string service_name = 2;
 }
 
 message LookupResponse {
-    bool   found        = 1;
-    string service_name = 2;
-    string auth_mode    = 3;
+    bool   found     = 1;
+    string auth_mode = 2;
+}
+
+// ── Outbound tunnel (agent → broker → cloud TCP) ─────────────────────────────
+
+message OutboundClientMsg {
+    oneof payload {
+        OutboundConnect connect = 1;
+        bytes           data    = 2;
+        bool            fin     = 3;
+    }
+}
+
+message OutboundServerMsg {
+    oneof payload {
+        OutboundConnectAck ack  = 1;
+        bytes              data = 2;
+        bool               fin  = 3;
+    }
+}
+
+message OutboundConnect {
+    string session_id = 1;
+    string host       = 2;
+    uint32 port       = 3;
+}
+
+message OutboundConnectAck {
+    bool   success = 1;
+    string error   = 2;
 }
 
 // ── Shared ────────────────────────────────────────────────────────────────────

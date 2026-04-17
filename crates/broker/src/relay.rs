@@ -8,10 +8,15 @@ use tonic::{Request, Response, Status, Streaming};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use detour_core::{AuthMode, SessionId, SessionRecord};
+use detour_core::{AuthMode, ServiceRoute, SessionId, SessionRecord};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+
 use detour_proto::detour::{
-    agent_message, broker_message, detour_server::Detour, AgentMessage, BrokerMessage,
-    LookupRequest, LookupResponse, RelayRequestMsg, RelayResponse, RelayResponseMsg, SessionAck,
+    agent_message, broker_message, detour_server::Detour, outbound_client_msg, outbound_server_msg,
+    AgentMessage, BrokerMessage, LookupRequest, LookupResponse, OutboundClientMsg,
+    OutboundConnectAck, OutboundServerMsg, RelayRequestMsg, RelayResponse, RelayResponseMsg,
+    SessionAck,
 };
 
 use crate::auth::AuthService;
@@ -32,8 +37,9 @@ pub struct RelayService {
 
 #[tonic::async_trait]
 impl Detour for RelayService {
-    type OpenTunnelStream = ReceiverStream<Result<BrokerMessage, Status>>;
-    type RelayRequestStream = ReceiverStream<Result<RelayResponseMsg, Status>>;
+    type OpenTunnelStream    = ReceiverStream<Result<BrokerMessage, Status>>;
+    type RelayRequestStream  = ReceiverStream<Result<RelayResponseMsg, Status>>;
+    type OutboundTunnelStream = ReceiverStream<Result<OutboundServerMsg, Status>>;
 
     async fn open_tunnel(
         &self,
@@ -77,15 +83,26 @@ impl Detour for RelayService {
                             .unwrap_or_default()
                             .as_secs();
 
+                        let routes: Vec<ServiceRoute> = reg.routes.into_iter()
+                            .map(|r| ServiceRoute {
+                                service_name: r.service_name,
+                                local_port:   r.local_port as u16,
+                            })
+                            .collect();
+
+                        let service_summary = routes.iter()
+                            .map(|r| r.service_name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+
                         let record = SessionRecord {
-                            session_id:       sid.clone(),
-                            connection_id:    Uuid::new_v4().to_string(),
-                            broker_instance:  broker_id.clone(),
-                            service_name:     reg.service_name.clone(),
-                            auth_mode:        AuthMode::SessionId,
-                            registered_at:    now,
-                            last_heartbeat:   now,
-                            allowed_services: reg.allowed_services,
+                            session_id:      sid.clone(),
+                            connection_id:   Uuid::new_v4().to_string(),
+                            broker_instance: broker_id.clone(),
+                            auth_mode:       AuthMode::SessionId,
+                            registered_at:   now,
+                            last_heartbeat:  now,
+                            routes,
                         };
 
                         if let Err(e) = registry.register(record).await {
@@ -96,7 +113,7 @@ impl Detour for RelayService {
                         connections.insert(&sid, tx_clone.clone()).await;
                         session_id_opt = Some(sid.clone());
 
-                        info!(session_id = %sid, service = %reg.service_name, "session registered");
+                        info!(session_id = %sid, services = %service_summary, "session registered");
 
                         let _ = tx_clone.send(Ok(BrokerMessage {
                             payload: Some(broker_message::Payload::Ack(SessionAck {
@@ -181,12 +198,13 @@ impl Detour for RelayService {
             let relay_msg = BrokerMessage {
                 payload: Some(broker_message::Payload::Request(
                     detour_proto::detour::RelayRequest {
-                        request_id:  request_id.clone(),
-                        method:      chunk.method,
-                        path:        chunk.path,
-                        headers:     chunk.headers,
-                        body_chunk:  chunk.body_chunk,
-                        end_of_body: chunk.end_of_body,
+                        request_id:   request_id.clone(),
+                        method:       chunk.method,
+                        path:         chunk.path,
+                        headers:      chunk.headers,
+                        body_chunk:   chunk.body_chunk,
+                        end_of_body:  chunk.end_of_body,
+                        service_name: chunk.service_name,
                     },
                 )),
             };
@@ -229,22 +247,133 @@ impl Detour for RelayService {
         &self,
         request: Request<LookupRequest>,
     ) -> Result<Response<LookupResponse>, Status> {
-        let id_str = request.into_inner().session_id;
-        let sid    = SessionId::from_string(id_str)
+        let req    = request.into_inner();
+        let sid    = SessionId::from_string(req.session_id)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-        match self.registry.lookup(&sid).await {
+        match self.registry.lookup(&sid, &req.service_name).await {
             Ok(Some(record)) => Ok(Response::new(LookupResponse {
-                found:        true,
-                service_name: record.service_name,
-                auth_mode:    record.auth_mode.to_string(),
+                found:     true,
+                auth_mode: record.auth_mode.to_string(),
             })),
             Ok(None) => Ok(Response::new(LookupResponse {
-                found:        false,
-                service_name: String::new(),
-                auth_mode:    String::new(),
+                found:     false,
+                auth_mode: String::new(),
             })),
             Err(e) => Err(Status::internal(e.to_string())),
         }
+    }
+
+    async fn outbound_tunnel(
+        &self,
+        request: Request<Streaming<OutboundClientMsg>>,
+    ) -> Result<Response<Self::OutboundTunnelStream>, Status> {
+        let (tx, rx) = mpsc::channel::<Result<OutboundServerMsg, Status>>(64);
+        let mut stream = request.into_inner();
+        let registry = Arc::clone(&self.registry);
+
+        tokio::spawn(async move {
+            // First message must be OutboundConnect
+            let first = match stream.next().await {
+                Some(Ok(msg)) => msg,
+                _ => return,
+            };
+
+            let connect = match first.payload {
+                Some(outbound_client_msg::Payload::Connect(c)) => c,
+                _ => {
+                    let _ = tx.send(Err(Status::invalid_argument("first message must be OutboundConnect"))).await;
+                    return;
+                }
+            };
+
+            // Validate session exists (empty service_name = any service)
+            let sid = match SessionId::from_string(connect.session_id) {
+                Ok(s)  => s,
+                Err(e) => {
+                    let _ = tx.send(Err(Status::invalid_argument(e.to_string()))).await;
+                    return;
+                }
+            };
+
+            match registry.lookup(&sid, "").await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    let _ = tx.send(Ok(OutboundServerMsg {
+                        payload: Some(outbound_server_msg::Payload::Ack(OutboundConnectAck {
+                            success: false,
+                            error:   "session not found".into(),
+                        })),
+                    })).await;
+                    return;
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(Status::internal(e.to_string()))).await;
+                    return;
+                }
+            }
+
+            // Connect to target from inside VPC
+            let addr = format!("{}:{}", connect.host, connect.port);
+            let tcp = match TcpStream::connect(&addr).await {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = tx.send(Ok(OutboundServerMsg {
+                        payload: Some(outbound_server_msg::Payload::Ack(OutboundConnectAck {
+                            success: false,
+                            error:   e.to_string(),
+                        })),
+                    })).await;
+                    return;
+                }
+            };
+
+            let _ = tx.send(Ok(OutboundServerMsg {
+                payload: Some(outbound_server_msg::Payload::Ack(OutboundConnectAck {
+                    success: true,
+                    error:   String::new(),
+                })),
+            })).await;
+
+            let (mut tcp_rx, mut tcp_tx) = tcp.into_split();
+
+            // TCP → gRPC
+            let tx_clone = tx.clone();
+            let tcp_to_grpc = tokio::spawn(async move {
+                let mut buf = vec![0u8; 16384];
+                loop {
+                    match tcp_rx.read(&mut buf).await {
+                        Ok(0) | Err(_) => {
+                            let _ = tx_clone.send(Ok(OutboundServerMsg {
+                                payload: Some(outbound_server_msg::Payload::Fin(true)),
+                            })).await;
+                            break;
+                        }
+                        Ok(n) => {
+                            if tx_clone.send(Ok(OutboundServerMsg {
+                                payload: Some(outbound_server_msg::Payload::Data(buf[..n].to_vec())),
+                            })).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+
+            // gRPC → TCP
+            while let Some(Ok(msg)) = stream.next().await {
+                match msg.payload {
+                    Some(outbound_client_msg::Payload::Data(data)) => {
+                        if tcp_tx.write_all(&data).await.is_err() { break; }
+                    }
+                    Some(outbound_client_msg::Payload::Fin(true)) | None => break,
+                    _ => {}
+                }
+            }
+
+            tcp_to_grpc.abort();
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 }

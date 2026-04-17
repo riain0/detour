@@ -68,14 +68,13 @@ impl std::str::FromStr for AuthMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
-    pub session_id:       SessionId,
-    pub connection_id:    String,
-    pub broker_instance:  String,
-    pub service_name:     String,
-    pub auth_mode:        AuthMode,
-    pub registered_at:    u64,
-    pub last_heartbeat:   u64,
-    pub allowed_services: Vec<String>,
+    pub session_id:      SessionId,
+    pub connection_id:   String,
+    pub broker_instance: String,
+    pub auth_mode:       AuthMode,
+    pub registered_at:   u64,
+    pub last_heartbeat:  u64,
+    pub routes:          Vec<crate::ServiceRoute>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
