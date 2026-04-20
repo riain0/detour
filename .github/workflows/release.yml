@@ -29,9 +29,6 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
 
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -43,15 +40,10 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install protoc (Linux / macOS)
-        if: runner.os != 'Windows'
+      - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install protoc (Windows)
-        if: runner.os == 'Windows'
-        run: choco install protoc --no-progress
 
       - name: Install cross
         if: matrix.cross
@@ -73,8 +65,7 @@ jobs:
             --package detour-sidecar \
             --package detour-cli
 
-      - name: Package (Unix)
-        if: runner.os != 'Windows'
+      - name: Package
         shell: bash
         run: |
           BIN_DIR=target/${{ matrix.target }}/release
@@ -83,18 +74,6 @@ jobs:
           cp "$BIN_DIR/detour-sidecar" detour-sidecar
           cp "$BIN_DIR/detour"         detour
           tar czf "$ARCHIVE" detour-broker detour-sidecar detour
-          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
-
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          BIN_DIR=target/${{ matrix.target }}/release
-          ARCHIVE=detour-${{ github.ref_name }}-${{ matrix.target }}.zip
-          cp "$BIN_DIR/detour-broker.exe"  detour-broker.exe
-          cp "$BIN_DIR/detour-sidecar.exe" detour-sidecar.exe
-          cp "$BIN_DIR/detour.exe"         detour.exe
-          7z a "$ARCHIVE" detour-broker.exe detour-sidecar.exe detour.exe
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v4
