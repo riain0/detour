@@ -20,7 +20,7 @@ use detour_proto::detour::{
 };
 
 use crate::auth::AuthService;
-use crate::connections::{ConnectionMap, PendingRequests};
+use crate::connections::{ConnectionMap, PendingRequests, RawConnections};
 use crate::registry::SessionRegistry;
 
 /// How long relay_request waits for the agent to respond before giving up.
@@ -55,6 +55,7 @@ pub struct RelayService {
     pub registry: Arc<dyn SessionRegistry>,
     pub connections: ConnectionMap,
     pub pending_requests: PendingRequests,
+    pub raw_connections: RawConnections,
     pub auth: Arc<AuthService>,
     pub broker_id: String,
     pub ttl_secs: u64,
@@ -82,6 +83,7 @@ impl Detour for RelayService {
         let registry = Arc::clone(&self.registry);
         let connections = self.connections.clone();
         let pending_requests = self.pending_requests.clone();
+        let raw_connections = self.raw_connections.clone();
         let auth = Arc::clone(&self.auth);
         let broker_id = self.broker_id.clone();
         let ttl_secs = self.ttl_secs;
@@ -173,9 +175,13 @@ impl Detour for RelayService {
                         }
                     }
 
-                    // Raw connection frames over the tunnel are wired up by the
-                    // raw data plane (US-002); ignored here for now.
-                    Some(agent_message::Payload::Raw(_)) => {}
+                    // Raw connection frame from the agent — route it back to the
+                    // sidecar's RelayConnection stream by connection_id.
+                    Some(agent_message::Payload::Raw(frame)) => {
+                        if !raw_connections.deliver(frame).await {
+                            warn!("received raw frame for unknown connection_id — dropped");
+                        }
+                    }
 
                     None => {}
                 }
@@ -455,13 +461,114 @@ impl Detour for RelayService {
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 
-    // Raw per-connection byte-stream relay. The real routing logic lands in the
-    // raw data plane story (US-002); this stub establishes the RPC surface so
-    // the additive proto change compiles.
+    // Raw per-connection byte-stream relay. The opening frame carries the
+    // routing info (session_id + connection_id); payload chunks are forwarded in
+    // order to the matching agent over its OpenTunnel stream as BrokerMessage::Raw.
+    // Agent frames for this connection are routed back via raw_connections
+    // (see open_tunnel). is_eof closes the respective half.
     async fn relay_connection(
         &self,
-        _request: Request<Streaming<RawConnFrame>>,
+        request: Request<Streaming<RawConnFrame>>,
     ) -> Result<Response<Self::RelayConnectionStream>, Status> {
-        Err(Status::unimplemented("raw connection relay not yet wired up"))
+        let (resp_tx, resp_rx) = mpsc::channel::<Result<RawConnFrame, Status>>(64);
+        let mut stream = request.into_inner();
+        let connections = self.connections.clone();
+        let raw_connections = self.raw_connections.clone();
+
+        tokio::spawn(async move {
+            // First frame carries the session/connection routing info.
+            let first = match stream.next().await {
+                Some(Ok(f)) => f,
+                Some(Err(e)) => {
+                    let _ = resp_tx.send(Err(Status::internal(e.to_string()))).await;
+                    return;
+                }
+                None => return,
+            };
+
+            let session_id = match SessionId::from_string(first.session_id.clone()) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = resp_tx
+                        .send(Err(Status::invalid_argument(e.to_string())))
+                        .await;
+                    return;
+                }
+            };
+
+            let connection_id = first.connection_id.clone();
+            if connection_id.is_empty() {
+                let _ = resp_tx
+                    .send(Err(Status::invalid_argument("connection_id required")))
+                    .await;
+                return;
+            }
+
+            let agent_tx = match connections.get(&session_id).await {
+                Some(t) => t,
+                None => {
+                    warn!(session_id = %session_id, "no tunnel found for session");
+                    let _ = resp_tx
+                        .send(Err(Status::not_found("session not found")))
+                        .await;
+                    return;
+                }
+            };
+
+            // Register the response stream so open_tunnel can route the agent's
+            // frames for this connection back to the sidecar.
+            raw_connections.register(&connection_id, resp_tx.clone()).await;
+
+            let forward = |frame: RawConnFrame| BrokerMessage {
+                payload: Some(broker_message::Payload::Raw(frame)),
+            };
+
+            // Forward the opening frame to the agent.
+            if agent_tx.send(Ok(forward(first))).await.is_err() {
+                raw_connections.remove(&connection_id).await;
+                let _ = resp_tx
+                    .send(Err(Status::unavailable("agent tunnel closed")))
+                    .await;
+                return;
+            }
+
+            // Pump subsequent sidecar frames to the agent, in order.
+            let mut sidecar_eof = false;
+            while let Some(next) = stream.next().await {
+                let frame = match next {
+                    Ok(f) => f,
+                    Err(e) => {
+                        raw_connections.remove(&connection_id).await;
+                        let _ = resp_tx.send(Err(Status::internal(e.to_string()))).await;
+                        return;
+                    }
+                };
+
+                let is_eof = frame.is_eof;
+                if agent_tx.send(Ok(forward(frame))).await.is_err() {
+                    raw_connections.remove(&connection_id).await;
+                    let _ = resp_tx
+                        .send(Err(Status::unavailable("agent tunnel closed")))
+                        .await;
+                    return;
+                }
+
+                if is_eof {
+                    // Sidecar closed its half; keep the response side open until
+                    // the agent closes its half (handled in open_tunnel::deliver).
+                    sidecar_eof = true;
+                    break;
+                }
+            }
+
+            // Sidecar stream ended without a clean eof — the connection is gone,
+            // so drop the routing entry. (On a clean eof the agent half may still
+            // be sending, so we leave the entry for open_tunnel to clean up.)
+            if !sidecar_eof {
+                raw_connections.remove(&connection_id).await;
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(resp_rx)))
     }
 }

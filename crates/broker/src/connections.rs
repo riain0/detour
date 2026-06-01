@@ -3,11 +3,13 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
 use detour_core::SessionId;
-use detour_proto::detour::{BrokerMessage, RelayResponse, RelayResponseMsg};
+use detour_proto::detour::{BrokerMessage, RawConnFrame, RelayResponse, RelayResponseMsg};
 
 pub type TunnelTx = mpsc::Sender<Result<BrokerMessage, tonic::Status>>;
 
 pub type PendingTx = mpsc::Sender<Result<RelayResponseMsg, tonic::Status>>;
+
+pub type RawConnTx = mpsc::Sender<Result<RawConnFrame, tonic::Status>>;
 
 struct PendingEntry {
     tx: PendingTx,
@@ -109,6 +111,50 @@ impl PendingRequests {
     }
 }
 
+/// Tracks active raw connections, keyed by connection_id.
+/// relay_connection registers a sender for the sidecar's response stream;
+/// open_tunnel delivers the agent's raw frames to it as they arrive.
+#[derive(Default, Clone)]
+pub struct RawConnections {
+    inner: Arc<Mutex<HashMap<String, RawConnTx>>>,
+}
+
+impl RawConnections {
+    /// Register the sidecar response stream for a connection.
+    pub async fn register(&self, connection_id: &str, tx: RawConnTx) {
+        self.inner
+            .lock()
+            .await
+            .insert(connection_id.to_string(), tx);
+    }
+
+    pub async fn remove(&self, connection_id: &str) {
+        self.inner.lock().await.remove(connection_id);
+    }
+
+    /// Deliver an agent frame to the waiting sidecar stream. Returns true if a
+    /// waiter was found and notified. The entry is dropped once the frame closes
+    /// the connection half (is_eof) or the sidecar stream is gone.
+    pub async fn deliver(&self, frame: RawConnFrame) -> bool {
+        let connection_id = frame.connection_id.clone();
+        let is_eof = frame.is_eof;
+
+        let tx = {
+            let map = self.inner.lock().await;
+            match map.get(&connection_id) {
+                Some(tx) => tx.clone(),
+                None => return false,
+            }
+        };
+
+        let ok = tx.send(Ok(frame)).await.is_ok();
+        if is_eof || !ok {
+            self.inner.lock().await.remove(&connection_id);
+        }
+        ok
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,5 +226,63 @@ mod tests {
             })
             .await);
         assert!(!pending.timeout_unstarted(&request_id).await);
+    }
+
+    #[tokio::test]
+    async fn raw_connections_deliver_in_order_until_eof() {
+        let raw = RawConnections::default();
+        let (tx, mut rx) = mpsc::channel(4);
+        raw.register("conn-1", tx).await;
+
+        assert!(raw
+            .deliver(RawConnFrame {
+                session_id: "s".into(),
+                connection_id: "conn-1".into(),
+                payload: b"hello".to_vec(),
+                is_eof: false,
+                service_name: String::new(),
+            })
+            .await);
+        assert!(raw
+            .deliver(RawConnFrame {
+                session_id: "s".into(),
+                connection_id: "conn-1".into(),
+                payload: b" world".to_vec(),
+                is_eof: true,
+                service_name: String::new(),
+            })
+            .await);
+
+        let first = rx.recv().await.expect("first").expect("ok");
+        assert_eq!(first.payload, b"hello");
+        assert!(!first.is_eof);
+        let second = rx.recv().await.expect("second").expect("ok");
+        assert_eq!(second.payload, b" world");
+        assert!(second.is_eof);
+
+        // eof dropped the entry; further delivery finds no waiter.
+        assert!(!raw
+            .deliver(RawConnFrame {
+                session_id: "s".into(),
+                connection_id: "conn-1".into(),
+                payload: Vec::new(),
+                is_eof: false,
+                service_name: String::new(),
+            })
+            .await);
+    }
+
+    #[tokio::test]
+    async fn raw_connections_deliver_unknown_connection_returns_false() {
+        let raw = RawConnections::default();
+        assert!(!raw
+            .deliver(RawConnFrame {
+                session_id: "s".into(),
+                connection_id: "missing".into(),
+                payload: b"x".to_vec(),
+                is_eof: false,
+                service_name: String::new(),
+            })
+            .await);
     }
 }

@@ -16,7 +16,7 @@ use detour_core::{AuthMode, BrokerConfig};
 use detour_proto::detour::detour_server::DetourServer;
 
 use auth::AuthService;
-use connections::{ConnectionMap, PendingRequests};
+use connections::{ConnectionMap, PendingRequests, RawConnections};
 use relay::RelayService;
 
 #[tokio::main]
@@ -63,6 +63,7 @@ async fn main() -> anyhow::Result<()> {
         registry: Arc::clone(&registry),
         connections,
         pending_requests: PendingRequests::default(),
+        raw_connections: RawConnections::default(),
         auth,
         broker_id,
         ttl_secs: config.session_ttl_secs,
