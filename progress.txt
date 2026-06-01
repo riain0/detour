@@ -19,3 +19,17 @@
   - service_name on RawConnFrame is only meaningful on the opening frame (mirrors how RelayRequestMsg carries routing on first chunk in relay_request).
   - The `Raw` no-op arms in tunnel.rs/relay.rs are deliberate placeholders — US-002/US-003 fill them.
 ---
+
+## 2026-06-01 - US-002
+- Wired the broker-side raw byte-stream data plane: RelayConnection now does real per-connection multiplexing.
+- Files changed:
+  - crates/broker/src/connections.rs: new `RawConnTx` alias + `RawConnections` map (connection_id -> sidecar resp tx). `register`/`remove`/`deliver`. `deliver` drops the entry on is_eof or when the sidecar stream is gone. +2 unit tests.
+  - crates/broker/src/relay.rs: implemented `relay_connection` (was unimplemented stub). Opening frame -> (session_id, connection_id) routing; resolves agent tunnel via ConnectionMap; forwards frames to agent as `BrokerMessage::Raw` in order; is_eof on sidecar half breaks the pump but leaves the routing entry for the agent half. Filled the `agent_message::Payload::Raw(frame)` arm in open_tunnel to `raw_connections.deliver(frame)`. Added `raw_connections` field to RelayService.
+  - crates/broker/src/main.rs: construct `RawConnections::default()`.
+- Quality: `cargo check --workspace` clean; `cargo test --workspace` = 15 pass (was 13).
+- **Learnings for future iterations:**
+  - RawConnections is the raw-plane analogue of PendingRequests: PendingRequests is keyed by request_id (HTTP plane), RawConnections by connection_id (raw plane). Both deliver agent frames arriving on the single OpenTunnel AgentMessage stream back to the originating sidecar RPC.
+  - Close semantics are split-half: sidecar eof breaks the broker's read loop but the routing entry survives so the agent can still flush its half; the entry is reaped when the agent sends is_eof (deliver drops it) OR the sidecar stream dies without eof. A connection where neither side sends is_eof can leak an entry — acceptable for US-002, tighten in US-012 robustness if needed.
+  - US-003 (agent forwarder) must: on `broker_message::Payload::Raw` opening frame, dial upstream per connection_id and pump bytes both ways, emitting `AgentMessage::Raw` frames back with the same connection_id; is_eof closes the matching half. The broker is now ready to route those frames.
+  - US-004 (sidecar) is the client of relay_connection: it must set connection_id (broker rejects empty) and service_name on the opening frame.
+---

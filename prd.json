@@ -29,8 +29,8 @@
         "cargo test passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "relay_connection reads opening frame for (session_id, connection_id) routing, resolves agent tunnel via ConnectionMap, forwards frames to agent as BrokerMessage::Raw in order. Added RawConnections map (connection_id -> sidecar resp tx) in connections.rs; open_tunnel Raw arm delivers agent frames back via it. is_eof closes each half; deliver() drops entry on eof/closed sidecar. +2 unit tests. Replaces unimplemented() stub."
     },
     {
       "id": "US-003",
