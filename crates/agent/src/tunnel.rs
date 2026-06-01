@@ -182,6 +182,9 @@ async fn connect_and_run(
                     crate::forwarder::forward(req, local_port, tx_resp, body_rx).await;
                 });
             }
+            // Raw connection frames are handled by the raw data plane (US-003);
+            // ignored on the tunnel for now.
+            Some(broker_message::Payload::Raw(_)) => {}
             None => {}
         }
     }

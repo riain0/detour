@@ -15,7 +15,7 @@ use tokio::net::{lookup_host, TcpStream};
 use detour_proto::detour::{
     agent_message, broker_message, detour_server::Detour, outbound_client_msg, outbound_server_msg,
     AgentMessage, BrokerMessage, LookupRequest, LookupResponse, OutboundClientMsg,
-    OutboundConnectAck, OutboundServerMsg, RelayRequestMsg, RelayResponseMsg,
+    OutboundConnectAck, OutboundServerMsg, RawConnFrame, RelayRequestMsg, RelayResponseMsg,
     SessionAck,
 };
 
@@ -65,6 +65,7 @@ impl Detour for RelayService {
     type OpenTunnelStream = ReceiverStream<Result<BrokerMessage, Status>>;
     type RelayRequestStream = ReceiverStream<Result<RelayResponseMsg, Status>>;
     type OutboundTunnelStream = ReceiverStream<Result<OutboundServerMsg, Status>>;
+    type RelayConnectionStream = ReceiverStream<Result<RawConnFrame, Status>>;
 
     async fn open_tunnel(
         &self,
@@ -171,6 +172,10 @@ impl Detour for RelayService {
                             warn!("received RelayResponse for unknown request_id — dropped");
                         }
                     }
+
+                    // Raw connection frames over the tunnel are wired up by the
+                    // raw data plane (US-002); ignored here for now.
+                    Some(agent_message::Payload::Raw(_)) => {}
 
                     None => {}
                 }
@@ -448,5 +453,15 @@ impl Detour for RelayService {
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    // Raw per-connection byte-stream relay. The real routing logic lands in the
+    // raw data plane story (US-002); this stub establishes the RPC surface so
+    // the additive proto change compiles.
+    async fn relay_connection(
+        &self,
+        _request: Request<Streaming<RawConnFrame>>,
+    ) -> Result<Response<Self::RelayConnectionStream>, Status> {
+        Err(Status::unimplemented("raw connection relay not yet wired up"))
     }
 }

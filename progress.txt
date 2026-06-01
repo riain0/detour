@@ -1,0 +1,21 @@
+## Codebase Patterns
+- Rust workspace; quality gate = `cargo check --workspace` + `cargo test --workspace` (no web UI, no typecheck/lint step).
+- Proto lives in crates/proto/proto/detour.proto; build.rs codegen via tonic_prost_build. After editing, generated types are at `detour_proto::detour::*` (re-exported as `detour_proto::*`). Module-style oneof enums: `detour_proto::detour::agent_message::Payload::*`, `broker_message::Payload::*`, etc.
+- ADDING a field/variant to a proto oneof is NOT free: every exhaustive `match msg.payload` breaks. Known match sites: broker/src/relay.rs (open_tunnel on agent_message), agent/src/tunnel.rs (on broker_message). Add a `Some(...::Raw(_)) => {}` arm.
+- ADDING an RPC to the `service Detour` forces broker/src/relay.rs `impl Detour for RelayService` to implement it (assoc stream type + method). Stub with `Err(Status::unimplemented(..))` if deferring real logic.
+- Existing data plane: sidecar↔broker = RelayRequest RPC (HTTP-shaped, request_id keyed). agent↔broker = OpenTunnel bidi (BrokerMessage→agent carries RelayRequest; AgentMessage→broker carries RelayResponse). OutboundTunnel = raw TCP egress (agent→broker→cloud), good reference for raw byte pumping (read loop + data/fin oneof, 16384 buf).
+- Connection bookkeeping: broker/src/connections.rs has ConnectionMap (session→agent tx) + PendingRequests (request_id→resp tx). Sessions keyed by detour_core::SessionId.
+- IMPORTANT prior state: feature branch started from ~1600-line uncommitted working tree on main (CLI run/env/auth, expanded layer, broker auth). Committed as baseline `a06ce8a` BEFORE US-001 so per-story commits stay isolated. Do NOT assume a clean bootstrap.
+
+## 2026-06-01 - US-001
+- Added raw connection proto messages to the data plane (additive, RelayRequest/RelayResponse left intact).
+- Files changed:
+  - crates/proto/proto/detour.proto: new `RawConnFrame {session_id, connection_id, payload(bytes), is_eof(bool), service_name}`; new `rpc RelayConnection(stream RawConnFrame) returns (stream RawConnFrame)`; added `RawConnFrame raw` variant to AgentMessage(=4) and BrokerMessage(=3) oneofs.
+  - crates/broker/src/relay.rs: import RawConnFrame; added `type RelayConnectionStream` + `relay_connection` stub returning `unimplemented`; no-op match arm for `agent_message::Payload::Raw`.
+  - crates/agent/src/tunnel.rs: no-op match arm for `broker_message::Payload::Raw`.
+- Quality: `cargo check --workspace` clean; `cargo test --workspace` = 13 tests pass.
+- **Learnings for future iterations:**
+  - US-002 must replace the `relay_connection` stub with real per-connection multiplexing keyed by (session_id, connection_id), pushing raw frames to the agent over its existing OpenTunnel BrokerMessage stream via the new `raw` variant, and reading agent's `raw` AgentMessage frames back.
+  - service_name on RawConnFrame is only meaningful on the opening frame (mirrors how RelayRequestMsg carries routing on first chunk in relay_request).
+  - The `Raw` no-op arms in tunnel.rs/relay.rs are deliberate placeholders — US-002/US-003 fill them.
+---

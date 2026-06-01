@@ -1,0 +1,189 @@
+{
+  "project": "Detour",
+  "branchName": "ralph/raw-socket-interception",
+  "description": "Move Detour from streamed HTTP relay to full socket-level interception: raw per-connection byte streams, WebSocket/upgrade support, gRPC parity, TUN fallback, outbound header propagation, and broker-side IAM authorization.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Add raw connection proto messages to data plane",
+      "description": "As a developer, I need proto messages for per-connection byte streams so the relay can carry raw socket data instead of HTTP-shaped messages.",
+      "acceptanceCriteria": [
+        "Add proto messages with fields: session_id, connection_id, payload (bytes), is_eof (bool)",
+        "Messages compile and are generated into the relevant crate(s)",
+        "Existing RelayRequest/RelayResponse left intact for now (additive change)",
+        "cargo check passes"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Added RawConnFrame {session_id, connection_id, payload, is_eof, service_name} + RelayConnection RPC. Additive: also added raw variant to AgentMessage/BrokerMessage oneofs. Broker relay_connection is an unimplemented() stub (US-002 wires it); tunnel/relay raw match arms are no-ops for now. RelayRequest/RelayResponse untouched."
+    },
+    {
+      "id": "US-002",
+      "title": "Add raw byte-stream data plane to broker relay",
+      "description": "As a developer, I need the broker relay to forward per-connection byte streams keyed by session_id/connection_id instead of HTTP message framing.",
+      "acceptanceCriteria": [
+        "crates/broker/src/relay.rs routes raw connection streams using session_id + connection_id",
+        "Payload chunks forwarded in order; is_eof closes the connection half",
+        "Existing broker registry tests still pass",
+        "cargo check passes",
+        "cargo test passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Add raw connection handling to agent forwarder",
+      "description": "As a developer, I need the agent forwarder to open a local connection per connection_id and pump raw bytes to/from the broker instead of replaying HTTP requests.",
+      "acceptanceCriteria": [
+        "crates/agent/src/forwarder.rs dials upstream per connection_id and streams payload bytes both directions",
+        "is_eof on either side closes the matching connection half",
+        "cargo check passes",
+        "cargo test passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Add raw connection interception to sidecar proxy",
+      "description": "As a developer, I need the sidecar to capture connections as raw byte streams before the HTTP-shaped proxy path so non-HTTP traffic can be relayed.",
+      "acceptanceCriteria": [
+        "crates/sidecar/src/proxy.rs streams accepted connections as raw payload chunks keyed by connection_id",
+        "Routed connections use the raw data plane (US-002) instead of RelayRequest/RelayResponse",
+        "cargo check passes",
+        "cargo test passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Intercept WebSocket and protocol upgrades before buffered path",
+      "description": "As a user, I want WebSocket and arbitrary upgraded protocols to be intercepted, so they must be captured before the buffered request-shaped proxy path.",
+      "acceptanceCriteria": [
+        "crates/sidecar/src/proxy.rs detects Upgrade/WebSocket connections and routes them through the raw data plane (US-004)",
+        "Upgraded connections are not buffered or HTTP-parsed",
+        "cargo check passes",
+        "cargo test passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Achieve gRPC bidirectional parity over raw streams",
+      "description": "As a user, I want full gRPC bidi streaming to work without an HTTP-only translation layer, including trailer support.",
+      "acceptanceCriteria": [
+        "gRPC traffic flows over the raw connection data plane (US-002/US-004) without HTTP message reshaping",
+        "HTTP trailers are preserved end to end",
+        "cargo check passes",
+        "cargo test passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Inject X-Route-To into outbound HTTP in preload layer",
+      "description": "As a user, I want chained service-to-service detours, so the local interception layer must auto-inject the X-Route-To header on outbound HTTP requests.",
+      "acceptanceCriteria": [
+        "crates/layer/src/imp.rs injects X-Route-To on intercepted outbound HTTP requests when a route is configured",
+        "Requests without a configured route are unmodified",
+        "cargo check passes",
+        "cargo test passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Add service-scoped auth context to session registration",
+      "description": "As a developer, I need session registration to record which target Cloud Run service a session intends to intercept, so authorization can be scoped to that service.",
+      "acceptanceCriteria": [
+        "Session registration captures the target service identifier",
+        "Target service is available to broker auth during connection setup",
+        "cargo check passes",
+        "cargo test passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Add broker-side IAM authorization for target service",
+      "description": "As an operator, I want the broker to verify the OIDC identity is allowed to intercept the requested Cloud Run service, not just that the identity is a valid Google identity.",
+      "acceptanceCriteria": [
+        "crates/broker/src/auth.rs checks the validated identity against permission to intercept the target service (US-008)",
+        "Unauthorized identity is rejected before interception starts; authorized identity proceeds",
+        "Wired into crates/broker/src/main.rs request path",
+        "cargo check passes",
+        "cargo test passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Make sidecar fallback semantics explicit after routing",
+      "description": "As a developer, I want defined behavior when a routed request fails mid-stream, since fallback to upstream is unsafe once streaming to the broker has begun.",
+      "acceptanceCriteria": [
+        "Post-routing failures return an explicit, documented status (502) and never silently fall back to upstream",
+        "Behavior is covered by a test asserting no upstream fallback after routing starts",
+        "cargo check passes",
+        "cargo test passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Add TUN mode CLI and agent path",
+      "description": "As a user with Go/static binaries, I want a TUN/TAP interception fallback, so detour start needs a --mode tun path that LD_PRELOAD cannot cover.",
+      "acceptanceCriteria": [
+        "detour start --mode tun is accepted in crates/cli and dispatches a TUN interception path",
+        "Default mode remains LD_PRELOAD when --mode is omitted",
+        "cargo check passes",
+        "cargo test passes"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "Add request streaming robustness tests",
+      "description": "As a developer, I need tests for the streamed request path beyond the broker registry tests to cover failure and edge conditions.",
+      "acceptanceCriteria": [
+        "Tests cover: empty bodies, client disconnects, chunked uploads, backpressure, long-running streams",
+        "Tests assert correct stream teardown and no leaked connections",
+        "cargo test passes"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "Add end-to-end interception tests",
+      "description": "As a developer, I need end-to-end coverage for the routed interception paths.",
+      "acceptanceCriteria": [
+        "E2E tests cover: routed chunked upload, routed chunked download, server-sent events, OIDC auth success and failure, outbound SOCKS path with private DNS names",
+        "Tests document the Cloud Run deployment assumptions they rely on",
+        "cargo test passes"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

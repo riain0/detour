@@ -14,6 +14,10 @@ service Detour {
 
     // Agent calls this to forward an outbound TCP connection through the broker
     rpc OutboundTunnel(stream OutboundClientMsg) returns (stream OutboundServerMsg);
+
+    // Sidecar calls this to relay a matched inbound connection as a raw byte
+    // stream (socket-level interception) instead of HTTP-shaped messages.
+    rpc RelayConnection(stream RawConnFrame) returns (stream RawConnFrame);
 }
 
 // ── Agent → Broker ────────────────────────────────────────────────────────────
@@ -23,6 +27,7 @@ message AgentMessage {
         RegisterSession register  = 1;
         Heartbeat       heartbeat = 2;
         RelayResponse   response  = 3;
+        RawConnFrame    raw       = 4;
     }
 }
 
@@ -55,6 +60,7 @@ message BrokerMessage {
     oneof payload {
         SessionAck   ack     = 1;
         RelayRequest request = 2;
+        RawConnFrame raw     = 3;
     }
 }
 
@@ -133,6 +139,22 @@ message OutboundConnect {
 message OutboundConnectAck {
     bool   success = 1;
     string error   = 2;
+}
+
+// ── Raw connection data plane (socket-level interception) ────────────────────
+//
+// One bidirectional RelayConnection stream multiplexes many connections,
+// keyed by (session_id, connection_id). Each frame carries an ordered chunk
+// of socket bytes; is_eof signals the sender has closed its half of the
+// connection. service_name is set on the opening frame so the broker can
+// route the connection to the right agent/route; later frames may leave it
+// empty.
+message RawConnFrame {
+    string session_id    = 1;
+    string connection_id = 2;
+    bytes  payload       = 3;
+    bool   is_eof        = 4;
+    string service_name  = 5;
 }
 
 // ── Shared ────────────────────────────────────────────────────────────────────
