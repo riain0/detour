@@ -46,6 +46,7 @@ impl AgentHandle {
 
         let broker_url = config.broker_url.clone();
         let auth_mode = config.auth_mode.clone();
+        let auth_token = config.auth_token.clone();
         let routes_clone = config.routes.clone();
         let session_clone = session_id.clone();
         let tx_clone = status_tx.clone();
@@ -54,6 +55,7 @@ impl AgentHandle {
             tunnel::run(
                 broker_url,
                 auth_mode,
+                auth_token,
                 routes_clone,
                 session_clone,
                 tx_clone,

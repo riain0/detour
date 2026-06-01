@@ -7,7 +7,10 @@ use axum::{
     response::IntoResponse,
 };
 use bytes::Bytes;
+use futures::StreamExt;
 use http_body_util::BodyExt;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tracing::{info, warn};
 
@@ -41,19 +44,6 @@ pub async fn handler(State(state): State<ProxyState>, req: Request) -> impl Into
 
     match session {
         Some(record) => {
-            // Collect body (with size guard)
-            let max_bytes = state.max_body_mb * 1024 * 1024;
-            let body_bytes = match collect_limited(body, max_bytes).await {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!(error = %e, "request body too large or read error");
-                    return Response::builder()
-                        .status(StatusCode::PAYLOAD_TOO_LARGE)
-                        .body(Body::from("payload too large"))
-                        .unwrap();
-                }
-            };
-
             if state.log_routed {
                 info!(
                     session_id = %record.session_id,
@@ -73,35 +63,109 @@ pub async fn handler(State(state): State<ProxyState>, req: Request) -> impl Into
                 })
                 .collect();
 
-            let chunks = vec![RelayRequestMsg {
-                request_id: request_id.clone(),
-                session_id: record.session_id.to_string(),
-                method: parts.method.to_string(),
-                path: parts.uri.to_string(),
-                headers,
-                body_chunk: body_bytes.to_vec(),
-                end_of_body: true,
-                service_name: state.service_name.clone(),
-            }];
+            let (relay_tx, relay_rx) = mpsc::channel::<RelayRequestMsg>(16);
+            let session_id = record.session_id.to_string();
+            let service_name = state.service_name.clone();
+            let method = parts.method.to_string();
+            let path = parts.uri.to_string();
+            let max_bytes = state.max_body_mb * 1024 * 1024;
 
-            let stream = tokio_stream::iter(chunks);
+            tokio::spawn(async move {
+                let mut sent_headers = false;
+                let mut total_bytes = 0u64;
+                let mut body = body;
+
+                while let Some(frame) = body.frame().await {
+                    let frame = match frame {
+                        Ok(frame) => frame,
+                        Err(_) => return,
+                    };
+
+                    let Ok(data) = frame.into_data() else {
+                        continue;
+                    };
+                    total_bytes += data.len() as u64;
+                    if total_bytes > max_bytes {
+                        return;
+                    }
+
+                    let msg = RelayRequestMsg {
+                        request_id: request_id.clone(),
+                        session_id: session_id.clone(),
+                        method: if sent_headers { String::new() } else { method.clone() },
+                        path: if sent_headers { String::new() } else { path.clone() },
+                        headers: if sent_headers { vec![] } else { headers.clone() },
+                        body_chunk: data.to_vec(),
+                        end_of_body: false,
+                        service_name: service_name.clone(),
+                    };
+                    if relay_tx.send(msg).await.is_err() {
+                        return;
+                    }
+                    sent_headers = true;
+                }
+
+                let _ = relay_tx
+                    .send(RelayRequestMsg {
+                        request_id,
+                        session_id,
+                        method: if sent_headers { String::new() } else { method },
+                        path: if sent_headers { String::new() } else { path },
+                        headers: if sent_headers { vec![] } else { headers },
+                        body_chunk: Vec::new(),
+                        end_of_body: true,
+                        service_name,
+                    })
+                    .await;
+            });
+
+            let stream = ReceiverStream::new(relay_rx);
             let mut client = state.broker_client.clone();
 
             match client.relay_request(stream).await {
                 Ok(resp) => {
                     let mut inbound = resp.into_inner();
-                    if let Ok(Some(msg)) = inbound.message().await {
-                        let mut builder = Response::builder().status(msg.status_code as u16);
-                        for h in &msg.headers {
-                            builder = builder.header(h.name.as_str(), h.value.as_str());
+                    match inbound.message().await {
+                        Ok(Some(msg)) => {
+                            let mut builder = Response::builder().status(msg.status_code as u16);
+                            for h in &msg.headers {
+                                builder = builder.header(h.name.as_str(), h.value.as_str());
+                            }
+
+                            if msg.end_of_body {
+                                return builder.body(Body::from(msg.body_chunk)).unwrap();
+                            }
+
+                            let first_chunk = Ok::<Bytes, std::io::Error>(Bytes::from(msg.body_chunk));
+                            let rest = inbound.map(|result| match result {
+                                Ok(msg) if msg.end_of_body => Ok(Bytes::new()),
+                                Ok(msg) => Ok(Bytes::from(msg.body_chunk)),
+                                Err(err) => Err(std::io::Error::other(err.to_string())),
+                            });
+                            let body_stream: futures::stream::BoxStream<'static, Result<Bytes, std::io::Error>> =
+                                Box::pin(futures::stream::once(async move { first_chunk }).chain(rest));
+
+                            return builder.body(Body::from_stream(body_stream)).unwrap();
                         }
-                        return builder.body(Body::from(msg.body_chunk)).unwrap();
+                        Ok(None) => Response::builder()
+                            .status(StatusCode::BAD_GATEWAY)
+                            .body(Body::from("relay closed before response"))
+                            .unwrap(),
+                        Err(e) => {
+                            warn!(error = %e, "relay response stream failed");
+                            Response::builder()
+                                .status(StatusCode::BAD_GATEWAY)
+                                .body(Body::from(e.to_string()))
+                                .unwrap()
+                        }
                     }
-                    passthrough(&parts, Bytes::new(), &state.app_upstream).await
                 }
                 Err(e) => {
-                    warn!(error = %e, "relay request failed, falling back");
-                    passthrough(&parts, body_bytes, &state.app_upstream).await
+                    warn!(error = %e, "relay request failed");
+                    Response::builder()
+                        .status(StatusCode::BAD_GATEWAY)
+                        .body(Body::from(e.to_string()))
+                        .unwrap()
                 }
             }
         }
@@ -156,12 +220,4 @@ async fn collect_body(body: Body) -> Bytes {
         .await
         .map(|b| b.to_bytes())
         .unwrap_or_default()
-}
-
-async fn collect_limited(body: Body, max_bytes: u64) -> anyhow::Result<Bytes> {
-    let bytes = body.collect().await?.to_bytes();
-    if bytes.len() as u64 > max_bytes {
-        anyhow::bail!("body exceeds {} bytes limit", max_bytes);
-    }
-    Ok(bytes)
 }

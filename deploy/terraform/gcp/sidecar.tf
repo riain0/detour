@@ -8,6 +8,10 @@
 #
 # Also ensure your template block has:
 #   execution_environment = "EXECUTION_ENVIRONMENT_GEN2"
+#   scaling {
+#     min_instance_count = 1
+#     max_instance_count = 1
+#   }
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Change 1: make your existing ports block conditional.
@@ -28,7 +32,14 @@ dynamic "containers" {
     name  = "detour-sidecar"
     image = "ghcr.io/riain0/detour-sidecar:latest"
 
-    ports { container_port = 8081 }
+    ports {
+      name           = "h2c"
+      container_port = 8081
+    }
+
+    resources {
+      cpu_idle = false
+    }
 
     env { name = "APP_UPSTREAM";         value = "localhost:8080" }
     env { name = "DETOUR_BROKER_URL";    value = var.detour_broker_url }

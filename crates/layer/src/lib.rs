@@ -9,14 +9,26 @@
 // Usage (macOS):
 //   DYLD_INSERT_LIBRARIES=/path/to/libdetour_layer.dylib DETOUR_SOCKS5_PORT=1081 node server.js
 //
-// How it works:
-//   getaddrinfo() — for hostnames that fail resolution (private cloud DNS),
-//     returns a fake IP in 198.18.0.0/15 and records hostname→fakeIP so that
-//     the subsequent connect() call can look up the original hostname for SOCKS5h.
+// Optional bypass controls:
+//   DETOUR_BYPASS_HOSTS=localhost,metadata.google.internal,*.svc.cluster.local
+//   DETOUR_BYPASS_PORTS=25,2525
 //
-//   connect() — intercepts all non-loopback IPv4 TCP connections:
-//     - Fake IP (198.18.x.x) → SOCKS5 CONNECT with original hostname (SOCKS5h)
-//     - Any other non-loopback IP → SOCKS5 CONNECT with the IP directly
+// Optional Unix socket remapping:
+//   DETOUR_UNIX_SOCKET_MAPS=/cloudsql/project:region:instance=db.internal:5432
+//
+// How it works:
+//   getaddrinfo(), gethostbyname*(), and Linux gethostbyname*_r() — rewrite
+//     resolved IPv4/IPv6 answers to fake addresses and, on lookup misses (for
+//     example private cloud DNS), synthesize fake results so the app can still
+//     proceed to connect().
+//
+//   connect() — intercepts non-loopback IPv4/IPv6 TCP connections:
+//     - Fake IPs → SOCKS5 CONNECT with original hostname (SOCKS5h)
+//     - Any other non-loopback IP → SOCKS5 CONNECT with the literal IP directly
+//     - Configured Unix socket paths → SOCKS5 CONNECT with the mapped TCP target
+//
+//   On macOS, connectx() simple TCP connects are also routed through the same
+//   outbound tunnel path.
 
 #[cfg(unix)]
 mod imp;

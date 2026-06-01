@@ -81,7 +81,7 @@ Set `DETOUR_SERVICE_NAME` to the same name developers will use when starting the
 | `APP_UPSTREAM` | `localhost:8080` | App container address |
 | `DETOUR_LISTEN_PORT` / `PORT` | `8000` | Sidecar listen port |
 | `DETOUR_SERVICE_NAME` | `""` | Only route sessions registered under this name |
-| `DETOUR_AUTH_MODE` | `session-id` | Must match the broker |
+| `DETOUR_AUTH_MODE` | `session-id` | Must match the broker. Supports `session-id`, `signed-token`, and `gcp-oidc` |
 
 ### Sidecar IaC
 
@@ -172,6 +172,8 @@ cargo install --path crates/cli
 detour start --route my-api:3000 --broker https://broker.example.com
 ```
 
+For Google Cloud identity-based auth, add `--auth-mode gcp-oidc`. The CLI will call `gcloud auth print-identity-token` locally and pass the resulting bearer token to the broker over gRPC metadata. Set `DETOUR_GCP_OIDC_AUDIENCE` on both sides if the broker should validate a specific audience rather than the broker URL.
+
 ```
   Detour v0.1.0
   Connecting to https://broker.example.com ...
@@ -191,6 +193,36 @@ curl -H "X-Route-To: a3f8c2d1-9e4b-4f1a-8c7d-2b5e6f0a1c3d" https://my-service.ex
 
 That request is relayed through the broker to `localhost:3000` on your machine. Everyone else hits the normal cloud app.
 
+### Running with Cloud Run defaults
+
+Start the tunnel, import literal Cloud Run env, inject the preload layer, and run your app locally:
+
+```bash
+detour run cloud-run \
+  --service my-api \
+  --region us-central1 \
+  --route my-api:3000 \
+  -- node server.js
+```
+
+This uses deployed env values by default, but anything already set in your local shell still wins. If you want a fully local env, skip the import step:
+
+```bash
+detour run cloud-run \
+  --service my-api \
+  --region us-central1 \
+  --route my-api:3000 \
+  --no-remote-env \
+  -- node server.js
+```
+
+If the CLI cannot find `libdetour_layer` automatically, point it at the built library explicitly:
+
+```bash
+DETOUR_LAYER_PATH=/path/to/libdetour_layer.dylib \
+detour run cloud-run --service my-api --region us-central1 --route my-api:3000 -- node server.js
+```
+
 ### Multiple services
 
 ```bash
@@ -202,9 +234,27 @@ detour start \
 
 All routes share a single session ID. The broker and sidecar use the service name to route each relayed request to the correct local port.
 
+### Importing Cloud Run env
+
+Pull literal environment values from a Cloud Run service:
+
+```bash
+eval "$(detour env cloud-run --service my-api --region us-central1)"
+```
+
+Pick a specific container in a multi-container service:
+
+```bash
+eval "$(detour env cloud-run --service my-api --region us-central1 --container app)"
+```
+
+Local environment variables you export afterwards still win, so you can override specific values without copying the full deployed env by hand.
+
+Secret-backed env vars are reported to stderr and skipped. Cloud Run returns the secret reference in `describe`, but not the resolved secret value.
+
 ### Outbound tunneling
 
-When your local service needs to reach cloud dependencies (databases, caches, internal APIs), the agent runs a SOCKS5 proxy on `127.0.0.1:1081`. Combined with the `LD_PRELOAD` layer library, all outbound TCP from your process is automatically tunneled through the broker — no code changes required.
+When your local service needs to reach cloud dependencies (databases, caches, internal APIs), the agent runs a SOCKS5 proxy on `127.0.0.1:1081`. Combined with the `LD_PRELOAD` layer library, outbound TCP from your process is tunneled through the broker so downstream calls still originate from the cloud side of Detour, not from your laptop.
 
 ```bash
 # Set LD_PRELOAD and start your service
@@ -215,7 +265,24 @@ node server.js
 
 The VS Code extension can do this automatically. Open a Detour terminal (`Ctrl+Shift+P` → **Detour: Open Terminal**) and the environment variables are already set. The extension also injects them into debug sessions when the agent is connected.
 
-Builds of `libdetour_layer.so` (Linux) and `libdetour_layer.dylib` (macOS) are included in each release.
+Builds of `libdetour_layer.so` (Linux) and `libdetour_layer.dylib` (macOS) are included in each release. The layer rewrites both IPv4 and IPv6 connects, intercepts `getaddrinfo()`, legacy `gethostbyname*()`, Linux `gethostbyname*_r()`, and simple macOS `connectx()` TCP connects, and synthesizes fake DNS answers when private cloud hostnames do not resolve on your machine.
+
+If a specific dependency should stay local, set bypass env vars before starting your app:
+
+```bash
+export DETOUR_BYPASS_HOSTS=localhost,metadata.google.internal,*.svc.cluster.local
+export DETOUR_BYPASS_PORTS=25,2525
+```
+
+This is useful for endpoints like local emulators, metadata services, or other destinations that should not be opened from inside Cloud Run.
+
+If your app reaches a downstream over a Unix socket, for example a Cloud SQL-style path, map that socket path to a TCP target that should be opened from the cloud side:
+
+```bash
+export DETOUR_UNIX_SOCKET_MAPS=/cloudsql/my-project:us-central1:primary=db.internal:5432
+```
+
+Mappings are `PATH_PREFIX=HOST:PORT` pairs separated by `;`. Prefix matching means a mapping for `/cloudsql/my-project:us-central1:primary` also catches socket files under that directory such as `.s.PGSQL.5432`.
 
 ### CLI reference
 

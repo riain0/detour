@@ -8,14 +8,14 @@ use tonic::{Request, Response, Status, Streaming};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use detour_core::{AuthMode, ServiceRoute, SessionId, SessionRecord};
+use detour_core::{ServiceRoute, SessionId, SessionRecord};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{lookup_host, TcpStream};
 
 use detour_proto::detour::{
     agent_message, broker_message, detour_server::Detour, outbound_client_msg, outbound_server_msg,
     AgentMessage, BrokerMessage, LookupRequest, LookupResponse, OutboundClientMsg,
-    OutboundConnectAck, OutboundServerMsg, RelayRequestMsg, RelayResponse, RelayResponseMsg,
+    OutboundConnectAck, OutboundServerMsg, RelayRequestMsg, RelayResponseMsg,
     SessionAck,
 };
 
@@ -25,6 +25,31 @@ use crate::registry::SessionRegistry;
 
 /// How long relay_request waits for the agent to respond before giving up.
 const RELAY_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn connect_outbound_target(host: &str, port: u16) -> std::io::Result<TcpStream> {
+    let addrs: Vec<_> = lookup_host((host, port)).await?.collect();
+    if addrs.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            "target did not resolve to any address",
+        ));
+    }
+
+    let mut last_err = None;
+    for addr in addrs {
+        match TcpStream::connect(addr).await {
+            Ok(stream) => return Ok(stream),
+            Err(err) => last_err = Some(err),
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "failed to connect to any resolved address",
+        )
+    }))
+}
 
 pub struct RelayService {
     pub registry: Arc<dyn SessionRegistry>,
@@ -46,6 +71,11 @@ impl Detour for RelayService {
         request: Request<Streaming<AgentMessage>>,
     ) -> Result<Response<Self::OpenTunnelStream>, Status> {
         let (tx, rx) = mpsc::channel::<Result<BrokerMessage, Status>>(64);
+        let bearer_token = request
+            .metadata()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         let mut stream = request.into_inner();
 
         let registry = Arc::clone(&self.registry);
@@ -73,7 +103,7 @@ impl Detour for RelayService {
                             }
                         };
 
-                        if let Err(e) = auth.validate(&sid, None) {
+                        if let Err(e) = auth.validate(&sid, bearer_token.as_deref()).await {
                             let _ = tx_clone
                                 .send(Err(Status::unauthenticated(e.to_string())))
                                 .await;
@@ -104,7 +134,7 @@ impl Detour for RelayService {
                             session_id: sid.clone(),
                             connection_id: Uuid::new_v4().to_string(),
                             broker_instance: broker_id.clone(),
-                            auth_mode: AuthMode::SessionId,
+                            auth_mode: auth.mode().clone(),
                             registered_at: now,
                             last_heartbeat: now,
                             routes,
@@ -137,8 +167,7 @@ impl Detour for RelayService {
                     }
 
                     Some(agent_message::Payload::Response(resp)) => {
-                        #[allow(clippy::collapsible_match)]
-                        if !pending_requests.complete(resp).await {
+                        if !pending_requests.push(resp).await {
                             warn!("received RelayResponse for unknown request_id — dropped");
                         }
                     }
@@ -169,7 +198,6 @@ impl Detour for RelayService {
 
         tokio::spawn(async move {
             // Read the first chunk to get session routing info.
-            // In practice the sidecar sends the whole (buffered) request in one chunk.
             let chunk = match stream.next().await {
                 Some(Ok(c)) => c,
                 Some(Err(e)) => {
@@ -200,9 +228,9 @@ impl Detour for RelayService {
                 }
             };
 
-            // Register a rendezvous slot so open_tunnel can deliver the response.
-            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel::<RelayResponse>();
-            let request_id = pending_requests.register(oneshot_tx).await;
+            // Register a response stream so open_tunnel can deliver chunks as they arrive.
+            let request_id = pending_requests.register(resp_tx.clone()).await;
+            let service_name = chunk.service_name.clone();
 
             // Push the request to the agent over its OpenTunnel stream.
             let relay_msg = BrokerMessage {
@@ -214,7 +242,7 @@ impl Detour for RelayService {
                         headers: chunk.headers,
                         body_chunk: chunk.body_chunk,
                         end_of_body: chunk.end_of_body,
-                        service_name: chunk.service_name,
+                        service_name: service_name.clone(),
                     },
                 )),
             };
@@ -227,33 +255,41 @@ impl Detour for RelayService {
                 return;
             }
 
-            // Wait for the agent to respond, with a timeout.
-            let agent_response = tokio::time::timeout(RELAY_TIMEOUT, oneshot_rx).await;
+            while let Some(next) = stream.next().await {
+                let next = match next {
+                    Ok(chunk) => chunk,
+                    Err(e) => {
+                        pending_requests.remove(&request_id).await;
+                        let _ = resp_tx.send(Err(Status::internal(e.to_string()))).await;
+                        return;
+                    }
+                };
 
-            match agent_response {
-                Ok(Ok(resp)) => {
-                    let msg = RelayResponseMsg {
-                        request_id: resp.request_id,
-                        status_code: resp.status_code,
-                        headers: resp.headers,
-                        body_chunk: resp.body_chunk,
-                        end_of_body: resp.end_of_body,
-                    };
-                    let _ = resp_tx.send(Ok(msg)).await;
-                }
-                Ok(Err(_)) => {
-                    // Oneshot sender dropped — agent disconnected mid-request
-                    let _ = resp_tx
-                        .send(Err(Status::unavailable("agent disconnected during relay")))
-                        .await;
-                }
-                Err(_) => {
+                let relay_msg = BrokerMessage {
+                    payload: Some(broker_message::Payload::Request(
+                        detour_proto::detour::RelayRequest {
+                            request_id: request_id.clone(),
+                            method: String::new(),
+                            path: String::new(),
+                            headers: vec![],
+                            body_chunk: next.body_chunk,
+                            end_of_body: next.end_of_body,
+                            service_name: service_name.clone(),
+                        },
+                    )),
+                };
+
+                if agent_tx.send(Ok(relay_msg)).await.is_err() {
                     pending_requests.remove(&request_id).await;
                     let _ = resp_tx
-                        .send(Err(Status::deadline_exceeded("agent relay timeout")))
+                        .send(Err(Status::unavailable("agent tunnel closed")))
                         .await;
+                    return;
                 }
             }
+
+            tokio::time::sleep(RELAY_TIMEOUT).await;
+            let _ = pending_requests.timeout_unstarted(&request_id).await;
         });
 
         Ok(Response::new(ReceiverStream::new(resp_rx)))
@@ -335,9 +371,9 @@ impl Detour for RelayService {
                 }
             }
 
-            // Connect to target from inside VPC
-            let addr = format!("{}:{}", connect.host, connect.port);
-            let tcp = match TcpStream::connect(&addr).await {
+            // Resolve the target from inside the cloud network. This keeps IPv6
+            // literals and hostnames working without relying on string formatting.
+            let tcp = match connect_outbound_target(connect.host.as_str(), connect.port as u16).await {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = tx

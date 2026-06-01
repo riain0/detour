@@ -5,6 +5,8 @@
 #
 # Variables to add:
 #   variable "detour_enabled" { type = bool; default = false }
+#   variable "detour_vpc_network" { type = string }
+#   variable "detour_vpc_subnet"  { type = string }
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "google_cloud_run_v2_service" "detour_broker" {
@@ -18,20 +20,38 @@ resource "google_cloud_run_v2_service" "detour_broker" {
 
     scaling {
       min_instance_count = 1
+      max_instance_count = 1
+    }
+
+    vpc_access {
+      network_interfaces {
+        network = var.detour_vpc_network
+        subnet  = var.detour_vpc_subnet
+      }
+      egress = "PRIVATE_RANGES_ONLY"
     }
 
     containers {
       image = "ghcr.io/riain0/detour-broker:latest"
 
+      resources {
+        cpu_idle = false
+      }
+
       # h2c = plaintext HTTP/2, required for gRPC streaming on Cloud Run
       ports {
         name           = "h2c"
-        container_port = 8080
+        container_port = 50051
       }
 
       env {
         name  = "DETOUR_AUTH_MODE"
         value = "session-id"
+      }
+
+      env {
+        name  = "PORT"
+        value = "50051"
       }
     }
   }

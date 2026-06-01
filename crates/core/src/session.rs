@@ -44,6 +44,7 @@ impl TryFrom<String> for SessionId {
 pub enum AuthMode {
     SessionId,
     SignedToken,
+    GcpOidc,
 }
 
 impl fmt::Display for AuthMode {
@@ -51,6 +52,7 @@ impl fmt::Display for AuthMode {
         match self {
             AuthMode::SessionId => f.write_str("session-id"),
             AuthMode::SignedToken => f.write_str("signed-token"),
+            AuthMode::GcpOidc => f.write_str("gcp-oidc"),
         }
     }
 }
@@ -61,6 +63,7 @@ impl std::str::FromStr for AuthMode {
         match s {
             "session-id" => Ok(AuthMode::SessionId),
             "signed-token" => Ok(AuthMode::SignedToken),
+            "gcp-oidc" => Ok(AuthMode::GcpOidc),
             other => Err(crate::DetourError::InvalidAuthMode(other.to_string())),
         }
     }

@@ -67,5 +67,6 @@ pub struct AgentConfig {
     pub broker_url: String,
     pub routes: Vec<ServiceRoute>,
     pub auth_mode: AuthMode,
+    pub auth_token: Option<String>,
     pub socks5_port: u16,
 }

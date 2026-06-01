@@ -1,3 +1,4 @@
+mod auth;
 mod commands;
 
 use clap::{Parser, Subcommand};
@@ -11,6 +12,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Print environment values for a remote service
+    Env(commands::env::EnvArgs),
+    /// Run a local process with remote runtime defaults
+    Run(commands::run::RunArgs),
     /// Start a tunnel session
     Start(commands::start::StartArgs),
     /// Show status of the current tunnel session
@@ -21,6 +26,8 @@ enum Command {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Env(args) => commands::env::run(args).await,
+        Command::Run(args) => commands::run::run(args).await,
         Command::Start(args) => commands::start::run(args).await,
         Command::Status(args) => commands::status::run(args).await,
     }

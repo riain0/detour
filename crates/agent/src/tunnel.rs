@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use bytes::Bytes;
 use tokio::sync::{oneshot, watch};
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, ClientTlsConfig};
+use tonic::Request;
 use tracing::{info, warn};
 
 use detour_core::{AuthMode, ServiceRoute, SessionId, TunnelStatus};
@@ -19,6 +22,7 @@ const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
 pub async fn run(
     broker_url: String,
     auth_mode: AuthMode,
+    auth_token: Option<String>,
     routes: Vec<ServiceRoute>,
     session_id: SessionId,
     status_tx: watch::Sender<TunnelStatus>,
@@ -30,7 +34,16 @@ pub async fn run(
     loop {
         let _ = status_tx.send(TunnelStatus::Connecting);
 
-        match connect_and_run(&broker_url, &auth_mode, &routes, &session_id, &status_tx).await {
+        match connect_and_run(
+            &broker_url,
+            &auth_mode,
+            auth_token.as_deref(),
+            &routes,
+            &session_id,
+            &status_tx,
+        )
+        .await
+        {
             Ok(()) => {
                 let _ = status_tx.send(TunnelStatus::Stopped);
                 return;
@@ -56,6 +69,7 @@ pub async fn run(
 async fn connect_and_run(
     broker_url: &str,
     auth_mode: &AuthMode,
+    auth_token: Option<&str>,
     routes: &[ServiceRoute],
     session_id: &SessionId,
     status_tx: &watch::Sender<TunnelStatus>,
@@ -92,8 +106,9 @@ async fn connect_and_run(
     })
     .await?;
 
-    let request_stream = ReceiverStream::new(rx);
-    let response = client.open_tunnel(request_stream).await.map_err(|e| {
+    let mut request = Request::new(ReceiverStream::new(rx));
+    attach_auth_metadata(&mut request, auth_mode, auth_token)?;
+    let response = client.open_tunnel(request).await.map_err(|e| {
         warn!(error = %e, "open_tunnel RPC failed");
         e
     })?;
@@ -107,6 +122,7 @@ async fn connect_and_run(
         .iter()
         .map(|r| (r.service_name.clone(), r.local_port))
         .collect();
+    let mut inflight_requests: HashMap<String, tokio::sync::mpsc::Sender<Bytes>> = HashMap::new();
 
     let session_id_str = session_id.to_string();
     let tx_hb = tx.clone();
@@ -132,6 +148,18 @@ async fn connect_and_run(
                 info!(session_id = %ack.session_id, ttl = ack.ttl, "session acknowledged");
             }
             Some(broker_message::Payload::Request(req)) => {
+                if let Some(body_tx) = inflight_requests.get(&req.request_id).cloned() {
+                    if !req.body_chunk.is_empty()
+                        && body_tx.send(Bytes::from(req.body_chunk.clone())).await.is_err()
+                    {
+                        inflight_requests.remove(&req.request_id);
+                    }
+                    if req.end_of_body {
+                        inflight_requests.remove(&req.request_id);
+                    }
+                    continue;
+                }
+
                 let local_port = match route_map.get(&req.service_name) {
                     Some(&p) => p,
                     None => {
@@ -139,9 +167,19 @@ async fn connect_and_run(
                         continue;
                     }
                 };
+                let (body_tx, body_rx) = tokio::sync::mpsc::channel::<Bytes>(16);
+                if !req.body_chunk.is_empty()
+                    && body_tx.send(Bytes::from(req.body_chunk.clone())).await.is_err()
+                {
+                    continue;
+                }
+                if !req.end_of_body {
+                    inflight_requests.insert(req.request_id.clone(), body_tx);
+                }
+
                 let tx_resp = tx.clone();
                 tokio::spawn(async move {
-                    crate::forwarder::forward(req, local_port, tx_resp).await;
+                    crate::forwarder::forward(req, local_port, tx_resp, body_rx).await;
                 });
             }
             None => {}
@@ -149,5 +187,19 @@ async fn connect_and_run(
     }
 
     heartbeat.abort();
+    Ok(())
+}
+
+fn attach_auth_metadata(
+    request: &mut Request<ReceiverStream<AgentMessage>>,
+    auth_mode: &AuthMode,
+    auth_token: Option<&str>,
+) -> anyhow::Result<()> {
+    if !matches!(auth_mode, AuthMode::SessionId) {
+        let token = auth_token.ok_or_else(|| anyhow::anyhow!("missing auth token for {}", auth_mode))?;
+        let value = MetadataValue::try_from(format!("Bearer {}", token))?;
+        request.metadata_mut().insert("authorization", value);
+    }
+
     Ok(())
 }

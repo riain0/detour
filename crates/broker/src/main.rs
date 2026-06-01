@@ -51,7 +51,12 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let jwt_secret = env::var("DETOUR_JWT_SECRET").ok();
-    let auth = Arc::new(AuthService::new(config.auth_mode.clone(), jwt_secret));
+    let auth = Arc::new(AuthService::new(
+        config.auth_mode.clone(),
+        jwt_secret,
+        env::var("DETOUR_GCP_OIDC_AUDIENCE").ok(),
+        env::var("DETOUR_ALLOWED_EMAIL_DOMAIN").ok(),
+    ));
     let connections = ConnectionMap::default();
 
     let service = RelayService {

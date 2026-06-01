@@ -5,6 +5,8 @@ use clap::Args;
 use detour_agent::{AgentConfig, AgentHandle};
 use detour_core::{AuthMode, ServiceRoute, TunnelStatus};
 
+use crate::auth::resolve_auth_token;
+
 #[derive(Args)]
 pub struct StartArgs {
     /// Service route(s) in "service-name:local-port" format (repeatable)
@@ -23,7 +25,7 @@ pub struct StartArgs {
     #[arg(long, default_value = "human")]
     pub output: String,
 
-    /// Auth mode: "session-id" or "signed-token"
+    /// Auth mode: "session-id", "signed-token", or "gcp-oidc"
     #[arg(long, default_value = "session-id")]
     pub auth_mode: String,
 
@@ -47,11 +49,13 @@ pub async fn run(args: StartArgs) -> anyhow::Result<()> {
         .iter()
         .map(|r| parse_route(r))
         .collect::<anyhow::Result<Vec<_>>>()?;
+    let auth_token = resolve_auth_token(&auth_mode, &args.broker)?;
 
     let config = AgentConfig {
         broker_url: args.broker.clone(),
         routes,
         auth_mode,
+        auth_token,
         socks5_port: args.socks5_port,
     };
 
@@ -68,19 +72,7 @@ pub async fn run(args: StartArgs) -> anyhow::Result<()> {
     }
 
     // Wait up to 10s for all tunnels to connect
-    let connected = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            match handle.status() {
-                TunnelStatus::Connected => return true,
-                TunnelStatus::Stopped => return false,
-                _ => {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }
-        }
-    })
-    .await
-    .unwrap_or(false);
+    let connected = wait_until_connected(&handle).await;
 
     if args.output == "json" {
         let sessions_json: Vec<_> = sessions
@@ -145,7 +137,21 @@ pub async fn run(args: StartArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn parse_route(s: &str) -> anyhow::Result<ServiceRoute> {
+pub(crate) async fn wait_until_connected(handle: &AgentHandle) -> bool {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match handle.status() {
+                TunnelStatus::Connected => return true,
+                TunnelStatus::Stopped => return false,
+                _ => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false)
+}
+
+pub(crate) fn parse_route(s: &str) -> anyhow::Result<ServiceRoute> {
     let colon = s
         .rfind(':')
         .ok_or_else(|| anyhow::anyhow!("invalid route {:?}: expected SERVICE:PORT", s))?;
