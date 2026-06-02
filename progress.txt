@@ -141,3 +141,15 @@
   - THE LEAK: forward_connection's broker->upstream loop could exit via (a) is_eof frame, (b) write error, or (c) broker_rx channel closing (client disconnect). Only (a) shut the write half. On (c) the upstream never saw EOF, so its echo/response never ended, so the upstream->broker read pump blocked forever and the task leaked. Now the write half is shut unconditionally after the loop. General rule for byte pumps: closing one direction's INPUT must propagate a shutdown to the OUTPUT, or the opposite pump never terminates.
   - Backpressure is provided free by tokio mpsc bounded channels: deliver/send AWAIT rather than drop, so a capacity-1 channel + slow consumer preserves order and applies flow control. The test asserts 200 ordered frames survive a cap-1 channel.
   - These tests target forward_connection (agent) as the representative streaming surface; the broker RawConnections eof-drop and sidecar relay_raw/splice byte-transparency are covered in their own crates' tests.
+
+## 2026-06-02 - US-013
+- Added end-to-end interception tests over the wire (in-process broker + simulated agent + simulated sidecar).
+- Files changed:
+  - crates/broker/src/e2e_tests.rs (NEW): start_broker() runs RelayService behind a real tonic Server on an ephemeral port; connect() retries until up; spawn_agent() registers over OpenTunnel (waits for SessionAck) and runs an App (Echo | Sse) against broker raw frames; sidecar role driven via real relay_connection/outbound_tunnel client RPCs. 5 tests: chunked upload+download, SSE, auth success (HS256), auth failure (Unauthenticated), outbound tunnel via DNS name.
+  - crates/broker/src/main.rs: #[cfg(test)] mod e2e_tests.
+- Quality: cargo test -p detour-broker = 13 pass (was 8).
+- **Learnings for future iterations:**
+  - Crate boundaries shape the E2E: handle_conn (sidecar) and forward_connection (agent) live in BIN crates, so a single test can't import all three. The broker crate is the natural host — it owns RelayService and the wire protocol — so the test plays sidecar+agent roles with raw frames. The per-crate unit tests cover the bin-local pumps; this covers the routing/auth/outbound wire path.
+  - Registration ordering trap: the sidecar's relay_connection looks up the session in ConnectionMap, so spawn_agent MUST await the SessionAck before the test issues relay_connection, else the lookup races and 'session not found'.
+  - OIDC can't be E2E'd offline (needs Google JWKS over the network, non-deterministic exp). Signed-token uses the identical AuthService::validate seam, so it stands in for the auth success/failure E2E; gcp-oidc specifics stay in auth unit tests. Documented in the module header alongside the other Cloud Run assumptions.
+  - serve(addr) binds asynchronously; bind-then-drop to grab a free port + retry-connect avoids the startup race without extra deps.

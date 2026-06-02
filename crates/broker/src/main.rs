@@ -3,6 +3,9 @@ mod connections;
 mod registry;
 mod relay;
 
+#[cfg(test)]
+mod e2e_tests;
+
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;

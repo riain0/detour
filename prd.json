@@ -182,8 +182,8 @@
         "cargo test passes"
       ],
       "priority": 13,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added in-process E2E tests (crates/broker/src/e2e_tests.rs, wired via #[cfg(test)] mod in main.rs) that run a real RelayService behind a tonic Server and drive it with a simulated agent (real OpenTunnel bidi stream) + simulated sidecar (real RelayConnection/OutboundTunnel client RPCs). Coverage: routed chunked upload+download (echo agent returns streamed chunks in order), server-sent events (one opening frame -> 3 streamed SSE events + eof), auth success (valid HS256 token -> SessionAck) and failure (wrong-secret token -> Code::Unauthenticated before registration), outbound SOCKS path resolving a DNS name ('localhost' -> broker-side lookup_host, echo round-trip). Documented Cloud Run assumptions in the module header (sidecar/agent roles, broker-side private-DNS resolution, and that gcp-oidc shares the same validate seam so signed-token stands in offline since OIDC needs live Google JWKS). 5 E2E tests; cargo test -p detour-broker = 13 pass."
     }
   ]
 }
