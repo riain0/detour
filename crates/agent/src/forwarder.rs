@@ -153,17 +153,21 @@ pub async fn forward_connection(
         // the stream, hanging this task.
         let _ = tcp_tx.shutdown().await;
     } else {
-        // broker → upstream. is_eof closes the upstream write half; the read half
-        // stays open so the response keeps flowing until upstream EOFs.
+        // broker → upstream. The read half stays open so the response keeps
+        // flowing until the upstream EOFs.
         while let Some(frame) = broker_rx.recv().await {
             if !frame.payload.is_empty() && tcp_tx.write_all(&frame.payload).await.is_err() {
                 break;
             }
             if frame.is_eof {
-                let _ = tcp_tx.shutdown().await;
                 break;
             }
         }
+        // The client half ended — via an is_eof frame, the broker stream closing
+        // (client disconnect), or a write error. In every case close the upstream
+        // write half so it sees EOF and the response can drain; otherwise the
+        // read pump would block forever and leak this task.
+        let _ = tcp_tx.shutdown().await;
     }
 
     // Keep relaying the upstream → broker half until the connection fully closes.
@@ -300,5 +304,153 @@ mod tests {
         };
         assert_eq!(frame.connection_id, "conn-2");
         assert!(frame.is_eof);
+    }
+
+    // ── US-012 streaming robustness ─────────────────────────────────────────
+
+    /// Spawn a TCP echo server; returns its port. Each connection echoes bytes
+    /// back and closes its write half when the client half EOFs.
+    async fn spawn_echo() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let (mut r, mut w) = sock.split();
+                    let _ = tokio::io::copy(&mut r, &mut w).await;
+                    let _ = w.shutdown().await;
+                });
+            }
+        });
+        port
+    }
+
+    /// Drain agent → broker frames until is_eof, returning the concatenated
+    /// payload. Asserts the connection_id is stable and the task tears down.
+    async fn collect_until_eof(rx: &mut mpsc::Receiver<AgentMessage>, cid: &str) -> Vec<u8> {
+        let mut data = Vec::new();
+        while let Some(msg) = rx.recv().await {
+            let Some(agent_message::Payload::Raw(frame)) = msg.payload else {
+                panic!("expected raw frame");
+            };
+            assert_eq!(frame.connection_id, cid);
+            data.extend_from_slice(&frame.payload);
+            if frame.is_eof {
+                break;
+            }
+        }
+        data
+    }
+
+    // Empty body: opening frame closes the client half immediately with no
+    // payload. The agent must close cleanly and emit a single is_eof frame.
+    #[tokio::test]
+    async fn forward_connection_empty_body_closes_cleanly() {
+        let port = spawn_echo().await;
+        let (tx, mut rx) = mpsc::channel::<AgentMessage>(16);
+        let (_btx, broker_rx) = mpsc::channel::<RawConnFrame>(16);
+
+        let handle = tokio::spawn(forward_connection(
+            open_frame("empty", Vec::new(), true),
+            port,
+            tx,
+            broker_rx,
+        ));
+
+        let data = collect_until_eof(&mut rx, "empty").await;
+        assert!(data.is_empty());
+        handle.await.unwrap();
+    }
+
+    // Chunked upload: opening payload plus several continuation frames, then an
+    // is_eof frame. The echo upstream returns the full concatenation in order.
+    #[tokio::test]
+    async fn forward_connection_chunked_upload_streams_in_order() {
+        let port = spawn_echo().await;
+        let (tx, mut rx) = mpsc::channel::<AgentMessage>(64);
+        let (btx, broker_rx) = mpsc::channel::<RawConnFrame>(16);
+
+        let handle = tokio::spawn(forward_connection(
+            open_frame("chunk", b"AAA".to_vec(), false),
+            port,
+            tx,
+            broker_rx,
+        ));
+
+        btx.send(open_frame("chunk", b"BBB".to_vec(), false)).await.unwrap();
+        btx.send(open_frame("chunk", b"CCC".to_vec(), false)).await.unwrap();
+        btx.send(open_frame("chunk", Vec::new(), true)).await.unwrap();
+
+        let data = collect_until_eof(&mut rx, "chunk").await;
+        assert_eq!(data, b"AAABBBCCC");
+        handle.await.unwrap();
+    }
+
+    // Client disconnect mid-stream: the broker stream closes WITHOUT an is_eof
+    // frame. forward_connection must still close the upstream write half so the
+    // response drains and the task exits — no leaked/hung connection.
+    #[tokio::test]
+    async fn forward_connection_client_disconnect_terminates() {
+        let port = spawn_echo().await;
+        let (tx, mut rx) = mpsc::channel::<AgentMessage>(16);
+        let (btx, broker_rx) = mpsc::channel::<RawConnFrame>(16);
+
+        let handle = tokio::spawn(forward_connection(
+            open_frame("drop", b"X".to_vec(), false),
+            port,
+            tx,
+            broker_rx,
+        ));
+
+        // Client vanished without a clean eof.
+        drop(btx);
+
+        let data = collect_until_eof(&mut rx, "drop").await;
+        assert_eq!(data, b"X");
+        // The task must complete promptly; a hang here means a leaked connection.
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("forward_connection leaked after client disconnect")
+            .unwrap();
+    }
+
+    // Long-running stream: many small frames with a bounded broker channel
+    // (capacity 1) exercises backpressure — send() blocks until the pump drains,
+    // and order/teardown are preserved.
+    #[tokio::test]
+    async fn forward_connection_long_stream_with_backpressure() {
+        let port = spawn_echo().await;
+        let (tx, mut rx) = mpsc::channel::<AgentMessage>(8);
+        let (btx, broker_rx) = mpsc::channel::<RawConnFrame>(1);
+
+        let handle = tokio::spawn(forward_connection(
+            open_frame("long", Vec::new(), false),
+            port,
+            tx,
+            broker_rx,
+        ));
+
+        let writer = tokio::spawn(async move {
+            for i in 0..200u32 {
+                let byte = (b'0' + (i % 10) as u8) as char;
+                let chunk = byte.to_string().repeat(4).into_bytes();
+                // A capacity-1 channel makes this await apply backpressure.
+                btx.send(open_frame("long", chunk, false)).await.unwrap();
+            }
+            btx.send(open_frame("long", Vec::new(), true)).await.unwrap();
+        });
+
+        let data = collect_until_eof(&mut rx, "long").await;
+        assert_eq!(data.len(), 200 * 4);
+        // Bytes arrive in send order (echoed verbatim).
+        let mut expected = Vec::new();
+        for i in 0..200u32 {
+            let byte = b'0' + (i % 10) as u8;
+            expected.extend(std::iter::repeat(byte).take(4));
+        }
+        assert_eq!(data, expected);
+
+        writer.await.unwrap();
+        handle.await.unwrap();
     }
 }

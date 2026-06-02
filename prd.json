@@ -169,8 +169,8 @@
         "cargo test passes"
       ],
       "priority": 12,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added streaming robustness tests against the raw connection pump (forward_connection), covering all required conditions: empty body (opening frame eof, no payload -> single eof frame, clean teardown), chunked upload (opening + N continuation frames + eof -> echo returns concatenation in order), client disconnect mid-stream (broker stream closes with NO eof frame), backpressure + long-running stream (200 frames over a capacity-1 broker channel -> send() blocks until drained, order preserved). Each asserts the spawned task completes (no leaked connection); the disconnect test wraps handle in a 5s timeout. FOUND+FIXED a real leak: forward_connection only shut the upstream write half on an is_eof frame, so a client disconnect (broker_rx closes without eof) left the write half open -> upstream never EOFs -> read pump blocks forever -> task leaks. Fix: shut the write half after the broker->upstream loop regardless of how it ended. cargo test -p detour-agent = 6 pass."
     },
     {
       "id": "US-013",

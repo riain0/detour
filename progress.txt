@@ -131,3 +131,13 @@
 - **Learnings for future iterations:**
   - `start` only runs the agent tunnel; it does NOT itself attach the preload shim (that is the `run` subcommand spawning a child with LD_PRELOAD). So --mode on `start` selects the LOCAL interception strategy the operator will use; tun is the only one needing agent-side device setup.
   - REMAINING WORK for real TUN: pull in a tun device crate (utun on macOS, /dev/net/tun on Linux), require elevated privileges, and run a packet->SOCKS5 forwarder (tun2socks-style) pointing at 127.0.0.1:socks5_port. activate() is the single entrypoint to flesh out; the CLI surface + dispatch + default are done and tested.
+
+## 2026-06-02 - US-012
+- Added streaming robustness tests for the raw connection pump; found + fixed a client-disconnect leak.
+- Files changed:
+  - crates/agent/src/forwarder.rs: FIX — shut the upstream write half after the broker->upstream loop ends for ANY reason (was only on an is_eof frame). +4 tests: empty body, chunked upload (in order), client disconnect mid-stream (5s timeout guard), long stream with capacity-1 backpressure. Helpers spawn_echo() + collect_until_eof().
+- Quality: cargo test -p detour-agent = 6 pass (was 2).
+- **Learnings for future iterations:**
+  - THE LEAK: forward_connection's broker->upstream loop could exit via (a) is_eof frame, (b) write error, or (c) broker_rx channel closing (client disconnect). Only (a) shut the write half. On (c) the upstream never saw EOF, so its echo/response never ended, so the upstream->broker read pump blocked forever and the task leaked. Now the write half is shut unconditionally after the loop. General rule for byte pumps: closing one direction's INPUT must propagate a shutdown to the OUTPUT, or the opposite pump never terminates.
+  - Backpressure is provided free by tokio mpsc bounded channels: deliver/send AWAIT rather than drop, so a capacity-1 channel + slow consumer preserves order and applies flow control. The test asserts 200 ordered frames survive a cap-1 channel.
+  - These tests target forward_connection (agent) as the representative streaming surface; the broker RawConnections eof-drop and sidecar relay_raw/splice byte-transparency are covered in their own crates' tests.
