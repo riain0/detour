@@ -100,3 +100,14 @@
   - No proto/SessionRecord change needed: RegisterSession.routes already carry the target service identifiers and SessionRecord.routes persists them. US-008 is purely the auth plumbing — capture (routes) was already there; "availability to auth" was the gap.
   - ORDER MATTERS in open_tunnel: reg.routes is moved into the ServiceRoute Vec, so target_services must be collected (cloned) from reg.routes BEFORE that map-collect, and before validate runs.
   - US-009 plugs into two spots: validate_jwt (signed-token: target_services ⊆ allowed_services) and a new gcp-oidc service-permission check. The data is now in hand at both.
+
+## 2026-06-02 - US-009
+- Added broker-side service-scoped IAM authorization for the target service.
+- Files changed:
+  - crates/broker/src/auth.rs: AuthService gains allowed_services: Option<Vec<String>>. New authorize_services(targets, allowed) -> rejects any target not in allowed (None = unrestricted). validate enforces per mode: session-id + gcp-oidc apply the broker allow-list AFTER identity validation; signed-token uses the JWT allowed_services claim (authoritative) else falls back to the broker list. +2 tests.
+  - crates/broker/src/main.rs: reads DETOUR_ALLOWED_SERVICES (comma list) into AuthService::new (now 5 args).
+- Quality: cargo test -p detour-broker = 8 pass (was 6).
+- **Learnings for future iterations:**
+  - Order in validate is the security property: identity FIRST, then authorize_services. relay open_tunnel maps any validate() Err to Status::unauthenticated and returns before registering the session/connection, so rejection happens before interception starts (AC met).
+  - Two layers of scoping: per-identity (signed-token's allowed_services claim) and org-wide (DETOUR_ALLOWED_SERVICES). The claim wins when present so a narrowly-scoped token can't be widened by a permissive broker list.
+  - This is allow-list authorization, not a live GCP IAM API call (which would be untestable here and add latency). For true per-principal-per-service IAM, swap authorize_services for a policy lookup (e.g. check the OIDC email against an IAM binding for the target Cloud Run service). The seam (target_services + validated identity in one place) is ready.

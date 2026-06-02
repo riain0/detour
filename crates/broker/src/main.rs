@@ -51,11 +51,21 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let jwt_secret = env::var("DETOUR_JWT_SECRET").ok();
+    // Optional broker-wide allow-list of interceptable services (US-009). Unset
+    // means no restriction.
+    let allowed_services = env::var("DETOUR_ALLOWED_SERVICES").ok().map(|v| {
+        v.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    });
     let auth = Arc::new(AuthService::new(
         config.auth_mode.clone(),
         jwt_secret,
         env::var("DETOUR_GCP_OIDC_AUDIENCE").ok(),
         env::var("DETOUR_ALLOWED_EMAIL_DOMAIN").ok(),
+        allowed_services,
     ));
     let connections = ConnectionMap::default();
 

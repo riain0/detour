@@ -128,8 +128,8 @@
         "cargo test passes"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added broker-side service-scoped authorization. auth.rs: AuthService gains allowed_services: Option<Vec<String>> (broker-wide allow-list; None = unrestricted). New authorize_services(targets, allowed) rejects any target not in the allow-list. Wired per mode: session-id and gcp-oidc enforce the broker allow-list after identity validation; signed-token uses the JWT's own allowed_services claim when present (per-identity scoping) else falls back to the broker list. validate now runs identity validation THEN authorization, so an unauthorized identity is rejected (Status::unauthenticated in relay open_tunnel) before any interception starts. main.rs reads DETOUR_ALLOWED_SERVICES (comma list) into the new param. +2 tests (authorize_services allow/deny matrix; session-id rejects unlisted service with the service name in the error). cargo test -p detour-broker = 8 pass."
     },
     {
       "id": "US-010",

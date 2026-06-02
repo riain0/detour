@@ -10,6 +10,8 @@ pub struct AuthService {
     secret: Option<String>,
     gcp_oidc_audience: Option<String>,
     allowed_email_domain: Option<String>,
+    // Broker-wide allow-list of interceptable services. None = no restriction.
+    allowed_services: Option<Vec<String>>,
 }
 
 impl AuthService {
@@ -18,12 +20,14 @@ impl AuthService {
         secret: Option<String>,
         gcp_oidc_audience: Option<String>,
         allowed_email_domain: Option<String>,
+        allowed_services: Option<Vec<String>>,
     ) -> Self {
         Self {
             mode,
             secret,
             gcp_oidc_audience,
             allowed_email_domain,
+            allowed_services,
         }
     }
 
@@ -47,9 +51,10 @@ impl AuthService {
     ) -> Result<(), DetourError> {
         match self.mode {
             AuthMode::SessionId => {
-                // Network boundary provides trust; accept any UUID v4 session.
-                let _ = target_services;
-                Ok(())
+                // Network boundary provides trust; still enforce the broker-wide
+                // service allow-list so a session can only intercept permitted
+                // services (US-009).
+                authorize_services(target_services, self.allowed_services.as_deref())
             }
             AuthMode::SignedToken => {
                 let secret = self
@@ -61,7 +66,7 @@ impl AuthService {
                     DetourError::AuthError("signed-token mode requires JWT".into())
                 })?;
 
-                validate_jwt(token, secret, target_services)
+                validate_jwt(token, secret, target_services, self.allowed_services.as_deref())
             }
             AuthMode::GcpOidc => {
                 let audience = self.gcp_oidc_audience.as_deref().ok_or_else(|| {
@@ -74,14 +79,41 @@ impl AuthService {
                     DetourError::AuthError("gcp-oidc mode requires bearer token".into())
                 })?;
 
+                // The identity must be a valid Google identity AND permitted to
+                // intercept every target service (US-009).
                 validate_google_identity_token(token, audience, self.allowed_email_domain.as_deref())
-                    .await
+                    .await?;
+                authorize_services(target_services, self.allowed_services.as_deref())
             }
         }
     }
 }
 
-fn validate_jwt(token: &str, secret: &str, target_services: &[String]) -> Result<(), DetourError> {
+/// Reject the registration unless every target service is permitted by `allowed`.
+/// `None` means no broker-wide restriction is configured (all services allowed).
+fn authorize_services(
+    target_services: &[String],
+    allowed: Option<&[String]>,
+) -> Result<(), DetourError> {
+    let Some(allowed) = allowed else {
+        return Ok(());
+    };
+    for service in target_services {
+        if !allowed.iter().any(|a| a == service) {
+            return Err(DetourError::AuthError(format!(
+                "not authorized to intercept service '{service}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_jwt(
+    token: &str,
+    secret: &str,
+    target_services: &[String],
+    broker_allowed: Option<&[String]>,
+) -> Result<(), DetourError> {
     #[derive(Deserialize)]
     struct Claims {
         #[allow(dead_code)]
@@ -97,11 +129,11 @@ fn validate_jwt(token: &str, secret: &str, target_services: &[String]) -> Result
         .map_err(|e| DetourError::AuthError(e.to_string()))?
         .claims;
 
-    // The token carries the target service identifiers so US-009 can authorize
-    // them against the token's allowed_services claim.
-    let _ = (&claims.allowed_services, target_services);
-
-    Ok(())
+    // The token's own allowed_services claim is authoritative when present
+    // (per-identity scoping); otherwise fall back to the broker-wide allow-list
+    // (US-009).
+    let allowed = claims.allowed_services.as_deref().or(broker_allowed);
+    authorize_services(target_services, allowed)
 }
 
 async fn validate_google_identity_token(
@@ -211,23 +243,56 @@ mod tests {
         SessionId::from_string("11111111-1111-4111-8111-111111111111".into()).unwrap()
     }
 
+    fn svc(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
     // US-008: validate accepts the target services the session will intercept.
-    // In session-id mode the network boundary is the trust, so any target passes.
+    // With no broker allow-list configured, any target passes in session-id mode.
     #[tokio::test]
     async fn validate_session_id_mode_accepts_target_services() {
-        let auth = AuthService::new(AuthMode::SessionId, None, None, None);
-        let targets = vec!["orders".to_string(), "billing".to_string()];
-        assert!(auth.validate(&sid(), &targets, None).await.is_ok());
+        let auth = AuthService::new(AuthMode::SessionId, None, None, None, None);
+        assert!(auth.validate(&sid(), &svc(&["orders", "billing"]), None).await.is_ok());
         // No targets is also fine in this mode.
         assert!(auth.validate(&sid(), &[], None).await.is_ok());
     }
 
     // signed-token mode still requires a token; the target services are carried
-    // through to the JWT check (enforced in US-009).
+    // through to the JWT check.
     #[tokio::test]
     async fn validate_signed_token_mode_requires_token() {
-        let auth = AuthService::new(AuthMode::SignedToken, Some("secret".into()), None, None);
-        let targets = vec!["orders".to_string()];
-        assert!(auth.validate(&sid(), &targets, None).await.is_err());
+        let auth = AuthService::new(AuthMode::SignedToken, Some("secret".into()), None, None, None);
+        assert!(auth.validate(&sid(), &svc(&["orders"]), None).await.is_err());
+    }
+
+    // US-009: the broker-wide allow-list scopes which services may be intercepted.
+    #[test]
+    fn authorize_services_enforces_allow_list() {
+        let allowed = svc(&["orders", "billing"]);
+        // Subset of the allow-list is permitted.
+        assert!(authorize_services(&svc(&["orders"]), Some(&allowed)).is_ok());
+        assert!(authorize_services(&svc(&["orders", "billing"]), Some(&allowed)).is_ok());
+        // A service outside the allow-list is rejected.
+        assert!(authorize_services(&svc(&["payments"]), Some(&allowed)).is_err());
+        assert!(authorize_services(&svc(&["orders", "payments"]), Some(&allowed)).is_err());
+        // No allow-list configured = no restriction.
+        assert!(authorize_services(&svc(&["anything"]), None).is_ok());
+    }
+
+    // US-009: session-id mode rejects a target outside the configured allow-list
+    // before any interception starts.
+    #[tokio::test]
+    async fn validate_session_id_mode_rejects_unlisted_service() {
+        let auth = AuthService::new(
+            AuthMode::SessionId,
+            None,
+            None,
+            None,
+            Some(svc(&["orders"])),
+        );
+        assert!(auth.validate(&sid(), &svc(&["orders"]), None).await.is_ok());
+        let err = auth.validate(&sid(), &svc(&["payments"]), None).await;
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("payments"));
     }
 }
