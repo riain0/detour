@@ -78,3 +78,14 @@
   - The win is byte-transparency: once a connection is on relay_raw, we never reshape it, so HTTP/2 DATA frames, flow control, and trailing-HEADERS (gRPC trailers / grpc-status) all survive unchanged. "Trailer support" needed no trailer-specific code — it falls out of not parsing.
   - HARD LIMIT: the HPACK decoder has no Huffman table. Real gRPC clients often Huffman-code header values, so x-route-to extraction can return None and the connection will splice (fail-safe, not misroute). To make h2 routing robust for arbitrary clients, add the static Huffman decode table to decode_str, OR have the detour client send x-route-to as a literal-never-indexed, non-Huffman field. CONTINUATION frames (HEADERS split across frames) are also not reassembled — assumes END_HEADERS on the first HEADERS frame.
   - first_headers_block reads from buffered[H2_PREFACE.len()..]; read_h2_route caps at MAX_H2_SNIFF (32KB) to avoid unbounded buffering on a client that never sends HEADERS.
+
+## 2026-06-02 - US-007
+- Added outbound X-Route-To injection to the preload layer (chained service-to-service detours).
+- Files changed:
+  - crates/layer/src/imp.rs: connect() success path calls track_routed_fd(sockfd). New routed_fds() map (fd -> head_handled bool), take_route_for_fd() (fires once per fd when DETOUR_ROUTE_TO set), untrack_fd(). Pure inject_route_header(buf, route) inserts "X-Route-To: <route>\r\n" after the request line iff buf is a complete HTTP/1.x head without the header (is_http_request_line + head_has_route_header guards). New interposers: send(), write() (rewrite first head via send_all loop, report app's original len), close() (untrack). real_send/real_write/real_close via dlsym(RTLD_NEXT). +6 tests.
+- Quality: cargo test -p detour-layer = 12 pass (was 6).
+- **Learnings for future iterations:**
+  - The layer is BELOW HTTP (socket syscalls), so header injection means rewriting bytes on send()/write(). The trick: send the larger rewritten buffer to the real send, but return the app's original `len` so the app thinks exactly its bytes went out. Per-fd "head_handled" flag ensures we only rewrite the first head and never inject mid-stream.
+  - fd REUSE is the sharp edge: without close() untracking, a recycled fd could carry a non-routed HTTP request and get injected. close() hook clears it; inject_route_header's HTTP-request-line guard is the backstop.
+  - Interposing send/write/close widens blast radius to ALL fds in the process. Safe because untracked fds hit a HashMap miss and pass straight through; hooks call real_* via RTLD_NEXT (no recursion). Still, this is the riskiest hook set in the layer — keep the fast path allocation-free.
+  - Limits (documented): the full request head must arrive in the first send/write (clients usually do this); non-blocking EAGAIN mid-rewrite aborts to plain passthrough; HEADERS-in-h2 / Go-static (no libc) are not covered here.

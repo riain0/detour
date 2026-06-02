@@ -99,8 +99,8 @@
         "cargo test passes"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "The layer is a socket-level LD_PRELOAD/DYLD shim (hooks connect/getaddrinfo, tunnels via SOCKS5) — it never saw HTTP. Added a write-path hook: connect() now records each fd it tunnels (track_routed_fd); new send()/write() interposers rewrite the FIRST request head on those fds via inject_route_header(), and close() untracks the fd (prevents fd-reuse mis-injection). inject_route_header(buf, route) is pure/tested: inserts 'X-Route-To: <route>\\r\\n' after the request line only when buf is a complete HTTP/1.x head (request line ends ' HTTP/1.1|1.0', CRLFCRLF present) lacking the header (case-insensitive); returns None (unmodified) for non-HTTP, HTTP/2 preface, partial heads, or an existing header. configured_route() reads DETOUR_ROUTE_TO (empty/unset => no injection => requests unmodified). send_all() loops partial writes and reports the app's original len. +6 tests. Documented limits: first-write-must-contain-full-head; non-blocking EAGAIN aborts to passthrough; Go static binaries bypass libc (US-011 TUN). cargo test -p detour-layer = 12 pass."
     },
     {
       "id": "US-008",

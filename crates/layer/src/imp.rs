@@ -978,6 +978,8 @@ pub unsafe extern "C" fn connect(
             if orig_flags >= 0 && orig_flags & libc::O_NONBLOCK != 0 {
                 libc::fcntl(sockfd, libc::F_SETFL, orig_flags);
             }
+            // Mark the fd for outbound X-Route-To injection (US-007).
+            track_routed_fd(sockfd);
             0
         }
         Err(_) => {
@@ -1064,6 +1066,205 @@ unsafe fn set_errno(e: c_int) {
     }
 }
 
+// ── outbound X-Route-To injection (US-007) ──────────────────────────────────
+//
+// For chained service-to-service detours, the local interception layer auto-
+// injects the X-Route-To header on outbound HTTP/1.x requests when a route is
+// configured via DETOUR_ROUTE_TO. The connect() hook records each fd it tunnels;
+// the send()/write() hooks rewrite the first request head on those fds. Requests
+// with no configured route — or already carrying the header — are untouched.
+
+const ROUTE_ENV: &str = "DETOUR_ROUTE_TO";
+
+/// The configured outbound route (session id), if any. None disables injection.
+fn configured_route() -> Option<String> {
+    std::env::var(ROUTE_ENV).ok().filter(|v| !v.trim().is_empty())
+}
+
+/// fd → whether its head has already been handled (injected or skipped). Only
+/// fds the connect() hook tunneled are present; everything else passes through.
+fn routed_fds() -> &'static Mutex<HashMap<c_int, bool>> {
+    static FDS: OnceLock<Mutex<HashMap<c_int, bool>>> = OnceLock::new();
+    FDS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Record a tunneled fd as a candidate for outbound header injection.
+fn track_routed_fd(fd: c_int) {
+    routed_fds()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(fd, false);
+}
+
+/// If `fd` is routed and its head hasn't been handled yet, mark it handled and
+/// return the configured route. Returns None for untracked/already-handled fds.
+fn take_route_for_fd(fd: c_int) -> Option<String> {
+    let route = configured_route()?;
+    let mut map = routed_fds().lock().unwrap_or_else(|e| e.into_inner());
+    match map.get_mut(&fd) {
+        Some(handled @ false) => {
+            *handled = true;
+            Some(route)
+        }
+        _ => None,
+    }
+}
+
+fn untrack_fd(fd: c_int) {
+    routed_fds()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&fd);
+}
+
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// Insert `X-Route-To: <route>` into an HTTP/1.x request head.
+///
+/// Returns `Some(rewritten)` only when `buf` begins with a complete HTTP/1.x
+/// request head (request line + CRLFCRLF) that does not already carry the
+/// header. Returns `None` (leave unmodified) for non-HTTP bytes, an incomplete
+/// head, or a request that already has X-Route-To.
+fn inject_route_header(buf: &[u8], route: &str) -> Option<Vec<u8>> {
+    let head_end = find_subsequence(buf, b"\r\n\r\n")?;
+    let head = &buf[..head_end];
+
+    let line_end = find_subsequence(head, b"\r\n").unwrap_or(head.len());
+    let request_line = &head[..line_end];
+    if !is_http_request_line(request_line) {
+        return None;
+    }
+
+    if head_has_route_header(head) {
+        return None;
+    }
+
+    let insert_at = line_end + 2; // just past the request line's CRLF
+    let mut out = Vec::with_capacity(buf.len() + route.len() + 16);
+    out.extend_from_slice(&buf[..insert_at]);
+    out.extend_from_slice(b"X-Route-To: ");
+    out.extend_from_slice(route.as_bytes());
+    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(&buf[insert_at..]);
+    Some(out)
+}
+
+/// A request line is `METHOD SP REQUEST-TARGET SP HTTP/1.x`.
+fn is_http_request_line(line: &[u8]) -> bool {
+    line.ends_with(b" HTTP/1.1") || line.ends_with(b" HTTP/1.0")
+}
+
+/// Case-insensitive scan of the header lines for an existing X-Route-To.
+fn head_has_route_header(head: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(head) else {
+        return false;
+    };
+    text.split("\r\n").skip(1).any(|line| {
+        line.split_once(':')
+            .map(|(name, _)| name.trim().eq_ignore_ascii_case("x-route-to"))
+            .unwrap_or(false)
+    })
+}
+
+type SendFn = unsafe extern "C" fn(c_int, *const c_void, libc::size_t, c_int) -> libc::ssize_t;
+type WriteFn = unsafe extern "C" fn(c_int, *const c_void, libc::size_t) -> libc::ssize_t;
+type CloseFn = unsafe extern "C" fn(c_int) -> c_int;
+
+fn real_send() -> SendFn {
+    unsafe {
+        let ptr = libc::dlsym(libc::RTLD_NEXT, c"send".as_ptr());
+        assert!(!ptr.is_null(), "dlsym(RTLD_NEXT, send) failed");
+        std::mem::transmute::<*mut c_void, SendFn>(ptr)
+    }
+}
+
+fn real_write() -> WriteFn {
+    unsafe {
+        let ptr = libc::dlsym(libc::RTLD_NEXT, c"write".as_ptr());
+        assert!(!ptr.is_null(), "dlsym(RTLD_NEXT, write) failed");
+        std::mem::transmute::<*mut c_void, WriteFn>(ptr)
+    }
+}
+
+fn real_close() -> CloseFn {
+    unsafe {
+        let ptr = libc::dlsym(libc::RTLD_NEXT, c"close".as_ptr());
+        assert!(!ptr.is_null(), "dlsym(RTLD_NEXT, close) failed");
+        std::mem::transmute::<*mut c_void, CloseFn>(ptr)
+    }
+}
+
+/// Write the whole injected buffer to the real send(), looping over partial
+/// writes. Returns true if all bytes were accepted. Best-effort: a hard error or
+/// EAGAIN on a non-blocking socket aborts and the caller falls back.
+unsafe fn send_all(fd: c_int, data: &[u8], flags: c_int) -> bool {
+    let mut off = 0usize;
+    while off < data.len() {
+        let n = real_send()(
+            fd,
+            data[off..].as_ptr() as *const c_void,
+            data.len() - off,
+            flags,
+        );
+        if n <= 0 {
+            return false;
+        }
+        off += n as usize;
+    }
+    true
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn send(
+    fd: c_int,
+    buf: *const c_void,
+    len: libc::size_t,
+    flags: c_int,
+) -> libc::ssize_t {
+    if !buf.is_null() && len > 0 {
+        if let Some(route) = take_route_for_fd(fd) {
+            let slice = std::slice::from_raw_parts(buf as *const u8, len);
+            if let Some(rewritten) = inject_route_header(slice, &route) {
+                if send_all(fd, &rewritten, flags) {
+                    // The app's original bytes were all delivered (plus our
+                    // header); report the count it expected.
+                    return len as libc::ssize_t;
+                }
+            }
+        }
+    }
+    real_send()(fd, buf, len, flags)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn write(
+    fd: c_int,
+    buf: *const c_void,
+    count: libc::size_t,
+) -> libc::ssize_t {
+    if !buf.is_null() && count > 0 {
+        if let Some(route) = take_route_for_fd(fd) {
+            let slice = std::slice::from_raw_parts(buf as *const u8, count);
+            if let Some(rewritten) = inject_route_header(slice, &route) {
+                if send_all(fd, &rewritten, 0) {
+                    return count as libc::ssize_t;
+                }
+            }
+        }
+    }
+    real_write()(fd, buf, count)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn close(fd: c_int) -> c_int {
+    untrack_fd(fd);
+    real_close()(fd)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1110,6 +1311,69 @@ mod tests {
             parse_target_host_port("[2001:db8::1]:6379"),
             Some(("2001:db8::1".to_string(), 6379))
         );
+    }
+
+    #[test]
+    fn inject_route_header_adds_header_after_request_line() {
+        let req = b"GET /api HTTP/1.1\r\nHost: svc\r\nAccept: */*\r\n\r\n";
+        let out = inject_route_header(req, "sess-1").expect("should inject");
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(
+            text,
+            "GET /api HTTP/1.1\r\nX-Route-To: sess-1\r\nHost: svc\r\nAccept: */*\r\n\r\n"
+        );
+        // Header lands before the existing headers and the body delimiter stays.
+        assert!(text.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn inject_route_header_preserves_body() {
+        let req = b"POST /x HTTP/1.1\r\nHost: svc\r\nContent-Length: 5\r\n\r\nhello";
+        let out = inject_route_header(req, "s2").unwrap();
+        assert!(out.ends_with(b"\r\n\r\nhello"));
+        assert!(find_subsequence(&out, b"X-Route-To: s2\r\n").is_some());
+    }
+
+    #[test]
+    fn inject_route_header_skips_when_already_present() {
+        // Case-insensitive: an existing x-route-to must not be duplicated.
+        let req = b"GET / HTTP/1.1\r\nHost: svc\r\nx-route-to: existing\r\n\r\n";
+        assert!(inject_route_header(req, "sess-1").is_none());
+    }
+
+    #[test]
+    fn inject_route_header_ignores_non_http_and_partial_heads() {
+        // Not an HTTP request line.
+        assert!(inject_route_header(b"\x16\x03\x01 TLS handshake\r\n\r\n", "s").is_none());
+        // HTTP/2 preface is not HTTP/1.x.
+        assert!(inject_route_header(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", "s").is_none());
+        // Incomplete head (no CRLFCRLF yet) — leave it for a later write.
+        assert!(inject_route_header(b"GET / HTTP/1.1\r\nHost: svc\r\n", "s").is_none());
+    }
+
+    #[test]
+    fn configured_route_requires_non_empty_env() {
+        unsafe { std::env::set_var(ROUTE_ENV, "  ") };
+        assert!(configured_route().is_none());
+        unsafe { std::env::set_var(ROUTE_ENV, "sess-xyz") };
+        assert_eq!(configured_route().as_deref(), Some("sess-xyz"));
+        unsafe { std::env::remove_var(ROUTE_ENV) };
+    }
+
+    #[test]
+    fn take_route_for_fd_only_fires_once_per_tracked_fd() {
+        unsafe { std::env::set_var(ROUTE_ENV, "sess-once") };
+        let fd = 4242;
+        // Untracked fd never routes.
+        assert!(take_route_for_fd(fd).is_none());
+
+        track_routed_fd(fd);
+        assert_eq!(take_route_for_fd(fd).as_deref(), Some("sess-once"));
+        // Head already handled — second call is a no-op so later writes pass through.
+        assert!(take_route_for_fd(fd).is_none());
+
+        untrack_fd(fd);
+        unsafe { std::env::remove_var(ROUTE_ENV) };
     }
 
     #[test]
