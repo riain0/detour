@@ -180,7 +180,8 @@ impl Detour for RelayService {
                     }
 
                     Some(agent_message::Payload::Response(resp)) => {
-                        if !pending_requests.push(resp).await {
+                        let delivered = pending_requests.push(resp).await;
+                        if !delivered {
                             warn!("received RelayResponse for unknown request_id — dropped");
                         }
                     }
@@ -188,7 +189,8 @@ impl Detour for RelayService {
                     // Raw connection frame from the agent — route it back to the
                     // sidecar's RelayConnection stream by connection_id.
                     Some(agent_message::Payload::Raw(frame)) => {
-                        if !raw_connections.deliver(frame).await {
+                        let delivered = raw_connections.deliver(frame).await;
+                        if !delivered {
                             warn!("received raw frame for unknown connection_id — dropped");
                         }
                     }

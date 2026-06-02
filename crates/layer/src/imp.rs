@@ -481,6 +481,13 @@ unsafe fn write_buffer_slice<T: Copy>(
     Some(ptr)
 }
 
+// POSIX h_errno values from netdb.h. The libc crate does not expose these on
+// every target, so define them with their standard values.
+#[cfg(target_os = "linux")]
+const H_TRY_AGAIN: c_int = 2;
+#[cfg(target_os = "linux")]
+const H_NO_RECOVERY: c_int = 3;
+
 #[cfg(target_os = "linux")]
 unsafe fn fill_fake_hostent_result(
     hostname: &str,
@@ -496,7 +503,7 @@ unsafe fn fill_fake_hostent_result(
             *result = std::ptr::null_mut();
         }
         if !h_errnop.is_null() {
-            *h_errnop = libc::NO_RECOVERY;
+            *h_errnop = H_NO_RECOVERY;
         }
         return libc::EINVAL;
     }
@@ -522,7 +529,7 @@ unsafe fn fill_fake_hostent_result(
                 *result = std::ptr::null_mut();
             }
             if !h_errnop.is_null() {
-                *h_errnop = libc::NO_RECOVERY;
+                *h_errnop = H_NO_RECOVERY;
             }
             return libc::EINVAL;
         }
@@ -536,7 +543,7 @@ unsafe fn fill_fake_hostent_result(
                 *result = std::ptr::null_mut();
             }
             if !h_errnop.is_null() {
-                *h_errnop = libc::TRY_AGAIN;
+                *h_errnop = H_TRY_AGAIN;
             }
             return libc::ERANGE;
         }
@@ -546,7 +553,7 @@ unsafe fn fill_fake_hostent_result(
             *result = std::ptr::null_mut();
         }
         if !h_errnop.is_null() {
-            *h_errnop = libc::TRY_AGAIN;
+            *h_errnop = H_TRY_AGAIN;
         }
         return libc::ERANGE;
     }
@@ -558,7 +565,7 @@ unsafe fn fill_fake_hostent_result(
                 *result = std::ptr::null_mut();
             }
             if !h_errnop.is_null() {
-                *h_errnop = libc::TRY_AGAIN;
+                *h_errnop = H_TRY_AGAIN;
             }
             return libc::ERANGE;
         }
@@ -572,7 +579,7 @@ unsafe fn fill_fake_hostent_result(
                 *result = std::ptr::null_mut();
             }
             if !h_errnop.is_null() {
-                *h_errnop = libc::TRY_AGAIN;
+                *h_errnop = H_TRY_AGAIN;
             }
             return libc::ERANGE;
         }
@@ -586,7 +593,7 @@ unsafe fn fill_fake_hostent_result(
                 *result = std::ptr::null_mut();
             }
             if !h_errnop.is_null() {
-                *h_errnop = libc::TRY_AGAIN;
+                *h_errnop = H_TRY_AGAIN;
             }
             return libc::ERANGE;
         }
