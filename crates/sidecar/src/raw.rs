@@ -112,6 +112,23 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+/// True if the request head asks to upgrade the protocol (WebSocket or any other
+/// `Connection: Upgrade` handshake). Such connections must flow over the raw data
+/// plane untouched — after the handshake the bytes are an opaque, non-HTTP stream
+/// (US-005).
+pub fn is_upgrade(headers: &HeaderMap) -> bool {
+    let connection_upgrade = headers
+        .get(http::header::CONNECTION)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            v.split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+        })
+        .unwrap_or(false);
+
+    connection_upgrade && headers.contains_key(http::header::UPGRADE)
+}
+
 /// Relay a routed connection over the broker `RelayConnection` RPC as raw
 /// per-connection byte frames (US-004). `initial` is the already-sniffed head
 /// (plus any pipelined body bytes) and rides the opening frame so the agent
@@ -300,6 +317,29 @@ mod tests {
         assert_eq!(head.headers.get("upgrade").unwrap(), "websocket");
         // The post-handshake WebSocket frame bytes are returned unparsed.
         assert_eq!(rest, b"\x81\x05hello");
+    }
+
+    #[test]
+    fn is_upgrade_detects_websocket_and_ignores_plain_requests() {
+        let mut ws = HeaderMap::new();
+        ws.insert(http::header::CONNECTION, "Upgrade".parse().unwrap());
+        ws.insert(http::header::UPGRADE, "websocket".parse().unwrap());
+        assert!(is_upgrade(&ws));
+
+        // Connection header may carry a comma-separated token list.
+        let mut ws2 = HeaderMap::new();
+        ws2.insert(http::header::CONNECTION, "keep-alive, Upgrade".parse().unwrap());
+        ws2.insert(http::header::UPGRADE, "h2c".parse().unwrap());
+        assert!(is_upgrade(&ws2));
+
+        // Connection: Upgrade without an Upgrade header is not an upgrade.
+        let mut partial = HeaderMap::new();
+        partial.insert(http::header::CONNECTION, "Upgrade".parse().unwrap());
+        assert!(!is_upgrade(&partial));
+
+        let mut plain = HeaderMap::new();
+        plain.insert(http::header::CONNECTION, "keep-alive".parse().unwrap());
+        assert!(!is_upgrade(&plain));
     }
 
     #[tokio::test]

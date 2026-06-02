@@ -58,3 +58,12 @@
   - HTTP/2 / gRPC (US-006): the h2 connection preface and HEADERS frames are NOT text and contain no CRLFCRLF request head, so sniff_head returns Err(raw) and the connection is spliced to app_upstream verbatim — NOT routed over the raw plane. Routing h2/gRPC needs either an h2 frame decoder to read :authority/headers or a routing signal that survives at the TCP layer (dedicated port, SNI). US-006 must address this; today gRPC falls through to passthrough.
   - reqwest + axum deps are now unused by the sidecar but left in Cargo.toml (harmless). Remove in a cleanup pass if desired.
   - HTTP/1.1 keep-alive: a routed connection relays the WHOLE socket (all pipelined/keep-alive requests) to one upstream connection via the agent. The route header is read once on the first request; subsequent requests on the same connection inherit the route (connection affinity). Correct for our model.
+
+## 2026-06-02 - US-005
+- Made WebSocket/upgrade interception explicit; the raw plane already carried it.
+- Files changed:
+  - crates/sidecar/src/raw.rs: added is_upgrade(&HeaderMap) — true when Connection contains an 'upgrade' token (comma-list aware, case-insensitive) AND an Upgrade header is present. +1 test (ws / comma-list h2c / partial / plain).
+  - crates/sidecar/src/proxy.rs: handle_conn detects upgrade and includes it in the routed log line. No control-flow change needed: upgrades already route raw because only the head is sniffed and the post-handshake stream is opaque.
+- Quality: cargo test --workspace passes (sidecar = 5 tests).
+- **Learnings for future iterations:**
+  - US-005 was structurally free once US-004 stopped buffering bodies. The detection exists to make the invariant explicit/observable, not to branch behavior. If a future change reintroduces any body buffering on the routed path, is_upgrade is the guard to branch on.

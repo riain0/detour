@@ -71,8 +71,8 @@
         "cargo test passes"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Satisfied by the US-004 sniff-then-splice design: only the request head is parsed, the body/post-handshake stream is opaque, so WebSocket and other Connection: Upgrade flows route over the raw data plane untouched. Added raw::is_upgrade(&HeaderMap) (Connection token list contains 'upgrade' AND an Upgrade header present) and wired explicit detection into handle_conn (logged on the routed path). Tests: is_upgrade matrix (ws, comma-list h2c, partial, plain) + the existing sniff_head_websocket test proving head-parsed-then-raw. cargo test --workspace passes."
     },
     {
       "id": "US-006",

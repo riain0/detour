@@ -48,6 +48,12 @@ pub async fn handle_conn(mut sock: TcpStream, state: ProxyState) {
         return;
     }
 
+    // Protocol upgrades (WebSocket, h2c, etc.) must never be buffered or
+    // HTTP-parsed past the handshake; the raw data plane handles them as opaque
+    // byte streams (US-005). We only sniffed the head, so this already holds —
+    // detect it explicitly for logging and to assert the invariant.
+    let upgrade = raw::is_upgrade(&head.headers);
+
     // Replay the bytes already read off the socket downstream so nothing is lost.
     let mut initial = head.raw;
     initial.extend_from_slice(&rest);
@@ -59,6 +65,7 @@ pub async fn handle_conn(mut sock: TcpStream, state: ProxyState) {
                     session_id = %record.session_id,
                     method     = %head.method,
                     path       = %head.path,
+                    upgrade,
                     "routing to local over raw data plane"
                 );
             }
