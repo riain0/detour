@@ -16,8 +16,7 @@ pub enum EnvCommand {
     CloudRun(CloudRunEnvArgs),
 }
 
-#[derive(Args)]
-#[derive(Clone)]
+#[derive(Args, Clone)]
 pub struct CloudRunEnvArgs {
     /// Cloud Run service name
     #[arg(long)]
@@ -65,8 +64,16 @@ pub async fn run(args: EnvArgs) -> anyhow::Result<()> {
 fn run_cloud_run(args: CloudRunEnvArgs) -> anyhow::Result<()> {
     let profile = load_cloud_run_profile(&args)?;
 
-    let resolved: Vec<_> = profile.env_vars.iter().filter(|v| v.value.is_some()).collect();
-    let unresolved: Vec<_> = profile.env_vars.iter().filter(|v| v.value.is_none()).collect();
+    let resolved: Vec<_> = profile
+        .env_vars
+        .iter()
+        .filter(|v| v.value.is_some())
+        .collect();
+    let unresolved: Vec<_> = profile
+        .env_vars
+        .iter()
+        .filter(|v| v.value.is_none())
+        .collect();
 
     match args.output.as_str() {
         "shell" => {
@@ -103,7 +110,10 @@ fn run_cloud_run(args: CloudRunEnvArgs) -> anyhow::Result<()> {
             });
             println!("{}", serde_json::to_string_pretty(&body)?);
         }
-        other => bail!("unsupported output format {:?}: expected shell or json", other),
+        other => bail!(
+            "unsupported output format {:?}: expected shell or json",
+            other
+        ),
     }
 
     if !unresolved.is_empty() {
@@ -168,7 +178,10 @@ fn describe_cloud_run_service(args: &CloudRunEnvArgs) -> anyhow::Result<Value> {
     serde_json::from_slice(&output.stdout).context("failed to parse gcloud JSON output")
 }
 
-fn extract_container_env(service: &Value, requested_container: Option<&str>) -> anyhow::Result<(String, Vec<EnvVar>)> {
+fn extract_container_env(
+    service: &Value,
+    requested_container: Option<&str>,
+) -> anyhow::Result<(String, Vec<EnvVar>)> {
     let containers = service
         .pointer("/template/containers")
         .or_else(|| service.pointer("/spec/template/spec/containers"))
@@ -183,7 +196,9 @@ fn extract_container_env(service: &Value, requested_container: Option<&str>) -> 
     } else {
         containers
             .iter()
-            .find(|container| container.get("name").and_then(Value::as_str) != Some("detour-sidecar"))
+            .find(|container| {
+                container.get("name").and_then(Value::as_str) != Some("detour-sidecar")
+            })
             .or_else(|| containers.first())
             .ok_or_else(|| anyhow!("Cloud Run service has no containers"))?
     };
@@ -205,7 +220,10 @@ fn extract_container_env(service: &Value, requested_container: Option<&str>) -> 
 
 fn parse_env_var(value: &Value) -> Option<EnvVar> {
     let name = value.get("name")?.as_str()?.to_string();
-    let literal = value.get("value").and_then(Value::as_str).map(str::to_string);
+    let literal = value
+        .get("value")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let source = value
         .pointer("/valueSource/secretKeyRef/secret")
         .and_then(Value::as_str)

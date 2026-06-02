@@ -33,9 +33,9 @@ pub async fn forward(
         Ok((status, headers, mut body)) => {
             let mut headers = Some(
                 headers
-                .into_iter()
-                .map(|(k, v)| Header { name: k, value: v })
-                .collect::<Vec<_>>(),
+                    .into_iter()
+                    .map(|(k, v)| Header { name: k, value: v })
+                    .collect::<Vec<_>>(),
             );
 
             while let Some(frame) = body.frame().await {
@@ -199,8 +199,8 @@ async fn do_forward(
         builder = builder.header(h.name.as_str(), h.value.as_str());
     }
 
-    let body_stream = ReceiverStream::new(body_rx)
-        .map(|chunk| Ok::<_, Infallible>(Frame::data(chunk)));
+    let body_stream =
+        ReceiverStream::new(body_rx).map(|chunk| Ok::<_, Infallible>(Frame::data(chunk)));
     let body = StreamBody::new(body_stream);
     let request = builder.body(body)?;
 
@@ -377,9 +377,15 @@ mod tests {
             broker_rx,
         ));
 
-        btx.send(open_frame("chunk", b"BBB".to_vec(), false)).await.unwrap();
-        btx.send(open_frame("chunk", b"CCC".to_vec(), false)).await.unwrap();
-        btx.send(open_frame("chunk", Vec::new(), true)).await.unwrap();
+        btx.send(open_frame("chunk", b"BBB".to_vec(), false))
+            .await
+            .unwrap();
+        btx.send(open_frame("chunk", b"CCC".to_vec(), false))
+            .await
+            .unwrap();
+        btx.send(open_frame("chunk", Vec::new(), true))
+            .await
+            .unwrap();
 
         let data = collect_until_eof(&mut rx, "chunk").await;
         assert_eq!(data, b"AAABBBCCC");
@@ -437,7 +443,9 @@ mod tests {
                 // A capacity-1 channel makes this await apply backpressure.
                 btx.send(open_frame("long", chunk, false)).await.unwrap();
             }
-            btx.send(open_frame("long", Vec::new(), true)).await.unwrap();
+            btx.send(open_frame("long", Vec::new(), true))
+                .await
+                .unwrap();
         });
 
         let data = collect_until_eof(&mut rx, "long").await;

@@ -132,10 +132,21 @@ async fn run_cloud_run(args: CloudRunRunArgs) -> anyhow::Result<()> {
         eprintln!();
         eprintln!("  X-Route-To: {}", sid);
         eprintln!();
-        eprintln!("  {}  →  localhost:{}", route.service_name, route.local_port);
+        eprintln!(
+            "  {}  →  localhost:{}",
+            route.service_name, route.local_port
+        );
         if let Some(profile) = &profile {
-            let imported = profile.env_vars.iter().filter(|var| var.value.is_some()).count();
-            let unresolved = profile.env_vars.iter().filter(|var| var.value.is_none()).count();
+            let imported = profile
+                .env_vars
+                .iter()
+                .filter(|var| var.value.is_some())
+                .count();
+            let unresolved = profile
+                .env_vars
+                .iter()
+                .filter(|var| var.value.is_none())
+                .count();
             eprintln!();
             eprintln!(
                 "  Runtime: Cloud Run {} ({})",
@@ -178,7 +189,11 @@ async fn run_child_process(
             }
         }
 
-        let unresolved: Vec<_> = profile.env_vars.iter().filter(|var| var.value.is_none()).collect();
+        let unresolved: Vec<_> = profile
+            .env_vars
+            .iter()
+            .filter(|var| var.value.is_none())
+            .collect();
         if !unresolved.is_empty() {
             eprintln!(
                 "Skipped {} secret-backed env var(s) from Cloud Run; local overrides can still supply them.",
@@ -260,7 +275,9 @@ fn resolve_layer_path(explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
     let candidates = [
         exe_dir.clone().map(|dir| dir.join(file_name)),
         exe_dir.clone().map(|dir| dir.join("..").join(file_name)),
-        current_dir.clone().map(|dir| dir.join("target").join("debug").join(file_name)),
+        current_dir
+            .clone()
+            .map(|dir| dir.join("target").join("debug").join(file_name)),
         current_dir.map(|dir| dir.join("target").join("release").join(file_name)),
     ];
 

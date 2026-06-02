@@ -110,11 +110,8 @@ impl Detour for RelayService {
                         // registered route service names. Captured here and
                         // handed to auth so authorization is scoped to the
                         // target service (US-008).
-                        let target_services: Vec<String> = reg
-                            .routes
-                            .iter()
-                            .map(|r| r.service_name.clone())
-                            .collect();
+                        let target_services: Vec<String> =
+                            reg.routes.iter().map(|r| r.service_name.clone()).collect();
 
                         if let Err(e) = auth
                             .validate(&sid, &target_services, bearer_token.as_deref())
@@ -397,7 +394,9 @@ impl Detour for RelayService {
 
             // Resolve the target from inside the cloud network. This keeps IPv6
             // literals and hostnames working without relying on string formatting.
-            let tcp = match connect_outbound_target(connect.host.as_str(), connect.port as u16).await {
+            let tcp = match connect_outbound_target(connect.host.as_str(), connect.port as u16)
+                .await
+            {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = tx
@@ -530,7 +529,9 @@ impl Detour for RelayService {
 
             // Register the response stream so open_tunnel can route the agent's
             // frames for this connection back to the sidecar.
-            raw_connections.register(&connection_id, resp_tx.clone()).await;
+            raw_connections
+                .register(&connection_id, resp_tx.clone())
+                .await;
 
             let forward = |frame: RawConnFrame| BrokerMessage {
                 payload: Some(broker_message::Payload::Raw(frame)),

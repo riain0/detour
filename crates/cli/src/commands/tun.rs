@@ -82,11 +82,20 @@ mod tests {
 
     #[test]
     fn intercept_mode_parses_known_values() {
-        assert_eq!("preload".parse::<InterceptMode>().unwrap(), InterceptMode::Preload);
-        assert_eq!("ld-preload".parse::<InterceptMode>().unwrap(), InterceptMode::Preload);
+        assert_eq!(
+            "preload".parse::<InterceptMode>().unwrap(),
+            InterceptMode::Preload
+        );
+        assert_eq!(
+            "ld-preload".parse::<InterceptMode>().unwrap(),
+            InterceptMode::Preload
+        );
         assert_eq!("tun".parse::<InterceptMode>().unwrap(), InterceptMode::Tun);
         assert_eq!("TUN".parse::<InterceptMode>().unwrap(), InterceptMode::Tun);
-        assert_eq!(" Tun-Tap ".parse::<InterceptMode>().unwrap(), InterceptMode::Tun);
+        assert_eq!(
+            " Tun-Tap ".parse::<InterceptMode>().unwrap(),
+            InterceptMode::Tun
+        );
     }
 
     #[test]

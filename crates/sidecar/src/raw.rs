@@ -618,7 +618,10 @@ mod tests {
     fn hpack_find_extracts_literal_header() {
         let frame = h2_headers_frame("x-route-to", "sess-uuid");
         let block = first_headers_block(&frame).expect("headers block");
-        assert_eq!(hpack_find(block, "x-route-to").as_deref(), Some("sess-uuid"));
+        assert_eq!(
+            hpack_find(block, "x-route-to").as_deref(),
+            Some("sess-uuid")
+        );
         assert_eq!(hpack_find(block, "missing"), None);
     }
 
@@ -660,7 +663,10 @@ mod tests {
 
         // Connection header may carry a comma-separated token list.
         let mut ws2 = HeaderMap::new();
-        ws2.insert(http::header::CONNECTION, "keep-alive, Upgrade".parse().unwrap());
+        ws2.insert(
+            http::header::CONNECTION,
+            "keep-alive, Upgrade".parse().unwrap(),
+        );
         ws2.insert(http::header::UPGRADE, "h2c".parse().unwrap());
         assert!(is_upgrade(&ws2));
 

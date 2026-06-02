@@ -165,24 +165,28 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         let request_id = pending.register(tx).await;
 
-        assert!(pending
-            .push(RelayResponse {
-                request_id: request_id.clone(),
-                status_code: 200,
-                headers: vec![],
-                body_chunk: b"hello".to_vec(),
-                end_of_body: false,
-            })
-            .await);
-        assert!(pending
-            .push(RelayResponse {
-                request_id: request_id.clone(),
-                status_code: 200,
-                headers: vec![],
-                body_chunk: b" world".to_vec(),
-                end_of_body: true,
-            })
-            .await);
+        assert!(
+            pending
+                .push(RelayResponse {
+                    request_id: request_id.clone(),
+                    status_code: 200,
+                    headers: vec![],
+                    body_chunk: b"hello".to_vec(),
+                    end_of_body: false,
+                })
+                .await
+        );
+        assert!(
+            pending
+                .push(RelayResponse {
+                    request_id: request_id.clone(),
+                    status_code: 200,
+                    headers: vec![],
+                    body_chunk: b" world".to_vec(),
+                    end_of_body: true,
+                })
+                .await
+        );
 
         let first = rx.recv().await.expect("first chunk").expect("ok result");
         assert_eq!(first.request_id, request_id);
@@ -193,15 +197,17 @@ mod tests {
         assert_eq!(second.body_chunk, b" world");
         assert!(second.end_of_body);
 
-        assert!(!pending
-            .push(RelayResponse {
-                request_id,
-                status_code: 200,
-                headers: vec![],
-                body_chunk: Vec::new(),
-                end_of_body: true,
-            })
-            .await);
+        assert!(
+            !pending
+                .push(RelayResponse {
+                    request_id,
+                    status_code: 200,
+                    headers: vec![],
+                    body_chunk: Vec::new(),
+                    end_of_body: true,
+                })
+                .await
+        );
     }
 
     #[tokio::test]
@@ -216,15 +222,17 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel(1);
         let request_id = pending.register(tx).await;
-        assert!(pending
-            .push(RelayResponse {
-                request_id: request_id.clone(),
-                status_code: 200,
-                headers: vec![],
-                body_chunk: b"chunk".to_vec(),
-                end_of_body: false,
-            })
-            .await);
+        assert!(
+            pending
+                .push(RelayResponse {
+                    request_id: request_id.clone(),
+                    status_code: 200,
+                    headers: vec![],
+                    body_chunk: b"chunk".to_vec(),
+                    end_of_body: false,
+                })
+                .await
+        );
         assert!(!pending.timeout_unstarted(&request_id).await);
     }
 
@@ -234,24 +242,26 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         raw.register("conn-1", tx).await;
 
-        assert!(raw
-            .deliver(RawConnFrame {
+        assert!(
+            raw.deliver(RawConnFrame {
                 session_id: "s".into(),
                 connection_id: "conn-1".into(),
                 payload: b"hello".to_vec(),
                 is_eof: false,
                 service_name: String::new(),
             })
-            .await);
-        assert!(raw
-            .deliver(RawConnFrame {
+            .await
+        );
+        assert!(
+            raw.deliver(RawConnFrame {
                 session_id: "s".into(),
                 connection_id: "conn-1".into(),
                 payload: b" world".to_vec(),
                 is_eof: true,
                 service_name: String::new(),
             })
-            .await);
+            .await
+        );
 
         let first = rx.recv().await.expect("first").expect("ok");
         assert_eq!(first.payload, b"hello");
@@ -261,28 +271,30 @@ mod tests {
         assert!(second.is_eof);
 
         // eof dropped the entry; further delivery finds no waiter.
-        assert!(!raw
-            .deliver(RawConnFrame {
+        assert!(
+            !raw.deliver(RawConnFrame {
                 session_id: "s".into(),
                 connection_id: "conn-1".into(),
                 payload: Vec::new(),
                 is_eof: false,
                 service_name: String::new(),
             })
-            .await);
+            .await
+        );
     }
 
     #[tokio::test]
     async fn raw_connections_deliver_unknown_connection_returns_false() {
         let raw = RawConnections::default();
-        assert!(!raw
-            .deliver(RawConnFrame {
+        assert!(
+            !raw.deliver(RawConnFrame {
                 session_id: "s".into(),
                 connection_id: "missing".into(),
                 payload: b"x".to_vec(),
                 is_eof: false,
                 service_name: String::new(),
             })
-            .await);
+            .await
+        );
     }
 }

@@ -154,7 +154,10 @@ async fn connect_and_run(
             Some(broker_message::Payload::Request(req)) => {
                 if let Some(body_tx) = inflight_requests.get(&req.request_id).cloned() {
                     if !req.body_chunk.is_empty()
-                        && body_tx.send(Bytes::from(req.body_chunk.clone())).await.is_err()
+                        && body_tx
+                            .send(Bytes::from(req.body_chunk.clone()))
+                            .await
+                            .is_err()
                     {
                         inflight_requests.remove(&req.request_id);
                     }
@@ -173,7 +176,10 @@ async fn connect_and_run(
                 };
                 let (body_tx, body_rx) = tokio::sync::mpsc::channel::<Bytes>(16);
                 if !req.body_chunk.is_empty()
-                    && body_tx.send(Bytes::from(req.body_chunk.clone())).await.is_err()
+                    && body_tx
+                        .send(Bytes::from(req.body_chunk.clone()))
+                        .await
+                        .is_err()
                 {
                     continue;
                 }
@@ -232,7 +238,8 @@ fn attach_auth_metadata(
     auth_token: Option<&str>,
 ) -> anyhow::Result<()> {
     if !matches!(auth_mode, AuthMode::SessionId) {
-        let token = auth_token.ok_or_else(|| anyhow::anyhow!("missing auth token for {}", auth_mode))?;
+        let token =
+            auth_token.ok_or_else(|| anyhow::anyhow!("missing auth token for {}", auth_mode))?;
         let value = MetadataValue::try_from(format!("Bearer {}", token))?;
         request.metadata_mut().insert("authorization", value);
     }

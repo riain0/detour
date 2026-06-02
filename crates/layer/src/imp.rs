@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io::{Read, Write};
 use std::net::{Ipv6Addr, TcpStream};
@@ -15,7 +15,12 @@ fn bypassed_host(host: &str) -> bool {
     std::env::var("DETOUR_BYPASS_HOSTS")
         .ok()
         .into_iter()
-        .flat_map(|v| v.split(',').map(str::trim).map(str::to_string).collect::<Vec<_>>())
+        .flat_map(|v| {
+            v.split(',')
+                .map(str::trim)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
         .any(|pattern| {
             !pattern.is_empty()
                 && if let Some(suffix) = pattern.strip_prefix("*.") {
@@ -30,7 +35,12 @@ fn bypassed_port(port: u16) -> bool {
     std::env::var("DETOUR_BYPASS_PORTS")
         .ok()
         .into_iter()
-        .flat_map(|v| v.split(',').map(str::trim).map(str::to_string).collect::<Vec<_>>())
+        .flat_map(|v| {
+            v.split(',')
+                .map(str::trim)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
         .filter_map(|port| port.parse::<u16>().ok())
         .any(|bypass| bypass == port)
 }
@@ -66,7 +76,12 @@ fn unix_socket_target(path: &str) -> Option<(String, u16)> {
     std::env::var("DETOUR_UNIX_SOCKET_MAPS")
         .ok()
         .into_iter()
-        .flat_map(|v| v.split(';').map(str::trim).map(str::to_string).collect::<Vec<_>>())
+        .flat_map(|v| {
+            v.split(';')
+                .map(str::trim)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
         .filter_map(|entry| {
             let equals = entry.find('=')?;
             let prefix = entry[..equals].trim().to_string();
@@ -114,7 +129,9 @@ unsafe fn unix_socket_path(addr: *const sockaddr, addrlen: socklen_t) -> Option<
         .iter()
         .position(|&b| b == 0)
         .unwrap_or(path_bytes.len());
-    std::str::from_utf8(&path_bytes[..len]).ok().map(str::to_string)
+    std::str::from_utf8(&path_bytes[..len])
+        .ok()
+        .map(str::to_string)
 }
 
 // ── Fake-IP table ──────────────────────────────────────────────────────────────
@@ -204,7 +221,12 @@ impl FakeHostentState {
         }
     }
 
-    fn populate(&mut self, hostname: &str, family: c_int, fake_id: u32) -> Option<*mut libc::hostent> {
+    fn populate(
+        &mut self,
+        hostname: &str,
+        family: c_int,
+        fake_id: u32,
+    ) -> Option<*mut libc::hostent> {
         self.name = CString::new(hostname).ok()?;
         self.hostent.h_name = self.name.as_ptr() as *mut c_char;
         self.hostent.h_aliases = self.aliases.as_mut_ptr();
@@ -263,7 +285,11 @@ unsafe fn hinted_protocol(hints: *const libc::addrinfo) -> c_int {
 }
 
 unsafe fn requested_family(hints: *const libc::addrinfo) -> c_int {
-    if hints.is_null() { 0 } else { (*hints).ai_family }
+    if hints.is_null() {
+        0
+    } else {
+        (*hints).ai_family
+    }
 }
 
 unsafe fn service_port(service: *const c_char) -> u16 {
@@ -713,7 +739,11 @@ pub unsafe extern "C" fn connectx(
         return real_connectx()(socket, endpoints, associd, flags, iov, iovcnt, len, connid);
     }
 
-    let rc = connect(socket, endpoints_ref.sae_dstaddr, endpoints_ref.sae_dstaddrlen);
+    let rc = connect(
+        socket,
+        endpoints_ref.sae_dstaddr,
+        endpoints_ref.sae_dstaddrlen,
+    );
     if rc == 0 {
         if !len.is_null() {
             *len = 0;
@@ -783,13 +813,8 @@ pub unsafe extern "C" fn getaddrinfo(
         }
         0
     } else {
-        let fake_ai = make_fake_addrinfo_list(
-            hints,
-            ai_family,
-            service_port(service),
-            fake_v4_be,
-            fake_v6,
-        );
+        let fake_ai =
+            make_fake_addrinfo_list(hints, ai_family, service_port(service), fake_v4_be, fake_v6);
         if fake_ai.is_null() {
             return real_ret; // allocation failed, propagate original error
         }
@@ -922,7 +947,11 @@ pub unsafe extern "C" fn connect(
                 return real_connect()(sockfd, addr, addrlen);
             }
 
-            let target = match table().lock().unwrap_or_else(|e| e.into_inner()).lookup_v4(ip) {
+            let target = match table()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .lookup_v4(ip)
+            {
                 Some(host) => host,
                 None => format!("{}.{}.{}.{}", octet0, octet1, (ip >> 8) & 0xFF, ip & 0xFF),
             };
@@ -939,7 +968,11 @@ pub unsafe extern "C" fn connect(
                 return real_connect()(sockfd, addr, addrlen);
             }
 
-            let target = match table().lock().unwrap_or_else(|e| e.into_inner()).lookup_v6(ip) {
+            let target = match table()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .lookup_v6(ip)
+            {
                 Some(host) => host,
                 None => ipv6.to_string(),
             };
@@ -1078,7 +1111,9 @@ const ROUTE_ENV: &str = "DETOUR_ROUTE_TO";
 
 /// The configured outbound route (session id), if any. None disables injection.
 fn configured_route() -> Option<String> {
-    std::env::var(ROUTE_ENV).ok().filter(|v| !v.trim().is_empty())
+    std::env::var(ROUTE_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
 }
 
 /// fd → whether its head has already been handled (injected or skipped). Only
@@ -1274,8 +1309,14 @@ mod tests {
         let mut table = FakeIpTable::new();
         let id = table.assign("db.internal");
 
-        assert_eq!(table.lookup_v4(fake_ipv4(id)), Some("db.internal".to_string()));
-        assert_eq!(table.lookup_v6(fake_ipv6(id)), Some("db.internal".to_string()));
+        assert_eq!(
+            table.lookup_v4(fake_ipv4(id)),
+            Some("db.internal".to_string())
+        );
+        assert_eq!(
+            table.lookup_v6(fake_ipv6(id)),
+            Some("db.internal".to_string())
+        );
     }
 
     #[test]

@@ -66,13 +66,17 @@ impl AuthService {
                     DetourError::AuthError("signed-token mode requires JWT".into())
                 })?;
 
-                validate_jwt(token, secret, target_services, self.allowed_services.as_deref())
+                validate_jwt(
+                    token,
+                    secret,
+                    target_services,
+                    self.allowed_services.as_deref(),
+                )
             }
             AuthMode::GcpOidc => {
                 let audience = self.gcp_oidc_audience.as_deref().ok_or_else(|| {
                     DetourError::AuthError(
-                        "gcp-oidc mode requires DETOUR_GCP_OIDC_AUDIENCE to be configured"
-                            .into(),
+                        "gcp-oidc mode requires DETOUR_GCP_OIDC_AUDIENCE to be configured".into(),
                     )
                 })?;
                 let token = token.ok_or_else(|| {
@@ -81,8 +85,12 @@ impl AuthService {
 
                 // The identity must be a valid Google identity AND permitted to
                 // intercept every target service (US-009).
-                validate_google_identity_token(token, audience, self.allowed_email_domain.as_deref())
-                    .await?;
+                validate_google_identity_token(
+                    token,
+                    audience,
+                    self.allowed_email_domain.as_deref(),
+                )
+                .await?;
                 authorize_services(target_services, self.allowed_services.as_deref())
             }
         }
@@ -220,7 +228,9 @@ async fn validate_google_identity_token(
         .email
         .ok_or_else(|| DetourError::AuthError("identity token missing email claim".into()))?;
     if claims.email_verified != Some(true) {
-        return Err(DetourError::AuthError("identity token email is not verified".into()));
+        return Err(DetourError::AuthError(
+            "identity token email is not verified".into(),
+        ));
     }
 
     if let Some(domain) = allowed_email_domain {
@@ -252,7 +262,10 @@ mod tests {
     #[tokio::test]
     async fn validate_session_id_mode_accepts_target_services() {
         let auth = AuthService::new(AuthMode::SessionId, None, None, None, None);
-        assert!(auth.validate(&sid(), &svc(&["orders", "billing"]), None).await.is_ok());
+        assert!(auth
+            .validate(&sid(), &svc(&["orders", "billing"]), None)
+            .await
+            .is_ok());
         // No targets is also fine in this mode.
         assert!(auth.validate(&sid(), &[], None).await.is_ok());
     }
@@ -261,8 +274,17 @@ mod tests {
     // through to the JWT check.
     #[tokio::test]
     async fn validate_signed_token_mode_requires_token() {
-        let auth = AuthService::new(AuthMode::SignedToken, Some("secret".into()), None, None, None);
-        assert!(auth.validate(&sid(), &svc(&["orders"]), None).await.is_err());
+        let auth = AuthService::new(
+            AuthMode::SignedToken,
+            Some("secret".into()),
+            None,
+            None,
+            None,
+        );
+        assert!(auth
+            .validate(&sid(), &svc(&["orders"]), None)
+            .await
+            .is_err());
     }
 
     // US-009: the broker-wide allow-list scopes which services may be intercepted.

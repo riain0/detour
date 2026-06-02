@@ -44,8 +44,16 @@ pub async fn handle_conn(mut sock: TcpStream, state: ProxyState) {
 
             let mut initial = head.raw;
             initial.extend_from_slice(&rest);
-            route_or_splice(state, &head.headers, &head.method, &head.path, upgrade, initial, sock)
-                .await;
+            route_or_splice(
+                state,
+                &head.headers,
+                &head.method,
+                &head.path,
+                upgrade,
+                initial,
+                sock,
+            )
+            .await;
         }
 
         // HTTP/2 (gRPC). Read frames to extract x-route-to from the first HEADERS

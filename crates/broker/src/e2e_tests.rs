@@ -172,7 +172,9 @@ async fn spawn_agent(url: &str, token: Option<String>, app: App) {
                             .send(agent_raw(&frame.connection_id, event.into_bytes(), false))
                             .await;
                     }
-                    let _ = tx.send(agent_raw(&frame.connection_id, Vec::new(), true)).await;
+                    let _ = tx
+                        .send(agent_raw(&frame.connection_id, Vec::new(), true))
+                        .await;
                 }
             }
         }
@@ -180,9 +182,7 @@ async fn spawn_agent(url: &str, token: Option<String>, app: App) {
 }
 
 /// Collect raw response frames from a RelayConnection stream until is_eof.
-async fn read_until_eof(
-    inbound: &mut tonic::Streaming<RawConnFrame>,
-) -> Vec<u8> {
+async fn read_until_eof(inbound: &mut tonic::Streaming<RawConnFrame>) -> Vec<u8> {
     let mut data = Vec::new();
     while let Some(item) = inbound.next().await {
         let frame = item.expect("frame ok");
@@ -198,7 +198,14 @@ async fn read_until_eof(
 // frames; the echo agent returns them as a chunked download.
 #[tokio::test]
 async fn e2e_routed_chunked_upload_and_download() {
-    let url = start_broker(AuthService::new(AuthMode::SessionId, None, None, None, None)).await;
+    let url = start_broker(AuthService::new(
+        AuthMode::SessionId,
+        None,
+        None,
+        None,
+        None,
+    ))
+    .await;
     spawn_agent(&url, None, App::Echo).await;
 
     let mut client = connect(&url).await;
@@ -224,12 +231,21 @@ async fn e2e_routed_chunked_upload_and_download() {
 // of SSE events delivered in order, terminated by is_eof.
 #[tokio::test]
 async fn e2e_routed_server_sent_events() {
-    let url = start_broker(AuthService::new(AuthMode::SessionId, None, None, None, None)).await;
+    let url = start_broker(AuthService::new(
+        AuthMode::SessionId,
+        None,
+        None,
+        None,
+        None,
+    ))
+    .await;
     spawn_agent(&url, None, App::Sse).await;
 
     let mut client = connect(&url).await;
     let (tx, rx) = mpsc::channel::<RawConnFrame>(16);
-    tx.send(sidecar_raw("sse", b"GET /events", false)).await.unwrap();
+    tx.send(sidecar_raw("sse", b"GET /events", false))
+        .await
+        .unwrap();
 
     let mut inbound = client
         .relay_connection(Request::new(ReceiverStream::new(rx)))
@@ -239,7 +255,10 @@ async fn e2e_routed_server_sent_events() {
 
     let got = read_until_eof(&mut inbound).await;
     let text = String::from_utf8(got).unwrap();
-    assert_eq!(text, "event: tick\ndata: 1\n\nevent: tick\ndata: 2\n\nevent: tick\ndata: 3\n\n");
+    assert_eq!(
+        text,
+        "event: tick\ndata: 1\n\nevent: tick\ndata: 2\n\nevent: tick\ndata: 3\n\n"
+    );
 }
 
 // OIDC auth path, success case — exercised in signed-token mode (same validate
@@ -277,9 +296,10 @@ async fn e2e_auth_failure_rejects_session() {
     tx.send(register_msg(SESSION)).await.unwrap();
 
     let mut request = Request::new(ReceiverStream::new(rx));
-    request
-        .metadata_mut()
-        .insert("authorization", make_jwt("a-different-secret").parse().unwrap());
+    request.metadata_mut().insert(
+        "authorization",
+        make_jwt("a-different-secret").parse().unwrap(),
+    );
 
     let mut inbound = client.open_tunnel(request).await.unwrap().into_inner();
     let first = inbound.next().await.expect("a response");
@@ -304,7 +324,14 @@ async fn e2e_outbound_tunnel_with_dns_name() {
         sock.write_all(&buf).await.unwrap(); // echo
     });
 
-    let url = start_broker(AuthService::new(AuthMode::SessionId, None, None, None, None)).await;
+    let url = start_broker(AuthService::new(
+        AuthMode::SessionId,
+        None,
+        None,
+        None,
+        None,
+    ))
+    .await;
     // A registered session is required before outbound is allowed.
     spawn_agent(&url, None, App::Echo).await;
 
@@ -345,7 +372,13 @@ async fn e2e_outbound_tunnel_with_dns_name() {
     // Read the echoed bytes back.
     let mut got = Vec::new();
     while got.len() < 4 {
-        match inbound.next().await.expect("data").expect("data ok").payload {
+        match inbound
+            .next()
+            .await
+            .expect("data")
+            .expect("data ok")
+            .payload
+        {
             Some(outbound_server_msg::Payload::Data(d)) => got.extend_from_slice(&d),
             Some(outbound_server_msg::Payload::Fin(_)) => break,
             _ => {}
