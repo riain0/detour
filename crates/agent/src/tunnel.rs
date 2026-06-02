@@ -12,7 +12,7 @@ use tracing::{info, warn};
 use detour_core::{AuthMode, ServiceRoute, SessionId, TunnelStatus};
 use detour_proto::detour::{
     agent_message, broker_message, detour_client::DetourClient, AgentMessage, Heartbeat,
-    RegisterSession, RouteEntry,
+    RawConnFrame, RegisterSession, RouteEntry,
 };
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
@@ -123,6 +123,10 @@ async fn connect_and_run(
         .map(|r| (r.service_name.clone(), r.local_port))
         .collect();
     let mut inflight_requests: HashMap<String, tokio::sync::mpsc::Sender<Bytes>> = HashMap::new();
+    // Active raw connections keyed by connection_id → channel feeding broker
+    // frames to the per-connection forwarder task (US-003).
+    let mut inflight_connections: HashMap<String, tokio::sync::mpsc::Sender<RawConnFrame>> =
+        HashMap::new();
 
     let session_id_str = session_id.to_string();
     let tx_hb = tx.clone();
@@ -182,9 +186,38 @@ async fn connect_and_run(
                     crate::forwarder::forward(req, local_port, tx_resp, body_rx).await;
                 });
             }
-            // Raw connection frames are handled by the raw data plane (US-003);
-            // ignored on the tunnel for now.
-            Some(broker_message::Payload::Raw(_)) => {}
+            // Raw per-connection byte stream from the broker (US-003).
+            Some(broker_message::Payload::Raw(frame)) => {
+                let connection_id = frame.connection_id.clone();
+
+                // Continuation frame for an already-open connection.
+                if let Some(conn_tx) = inflight_connections.get(&connection_id).cloned() {
+                    let is_eof = frame.is_eof;
+                    if conn_tx.send(frame).await.is_err() || is_eof {
+                        inflight_connections.remove(&connection_id);
+                    }
+                    continue;
+                }
+
+                // Opening frame: dial the routed upstream and start pumping.
+                let local_port = match route_map.get(&frame.service_name) {
+                    Some(&p) => p,
+                    None => {
+                        warn!(service = %frame.service_name, "no route for service, dropping connection");
+                        continue;
+                    }
+                };
+
+                let (conn_tx, conn_rx) = tokio::sync::mpsc::channel::<RawConnFrame>(16);
+                if !frame.is_eof {
+                    inflight_connections.insert(connection_id, conn_tx);
+                }
+
+                let tx_raw = tx.clone();
+                tokio::spawn(async move {
+                    crate::forwarder::forward_connection(frame, local_port, tx_raw, conn_rx).await;
+                });
+            }
             None => {}
         }
     }

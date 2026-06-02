@@ -43,8 +43,8 @@
         "cargo test passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "forward_connection dials 127.0.0.1:local_port per connection_id, pumps both halves: upstream->broker as AgentMessage::Raw frames (same connection_id), broker->upstream from broker_rx. is_eof closes the matching half. tunnel.rs broker_message::Payload::Raw arm: opening frame (route_map lookup) spawns forward_connection with a per-connection RawConnFrame channel tracked in inflight_connections; continuation frames forwarded to it; entry dropped on eof/closed. Fixed a deadlock: when the opening frame has is_eof=true the client half is already closed, so skip the broker_rx pump (else the task blocks on recv until the sidecar drops the stream and handle.await hangs). +2 unit tests. cargo check + cargo test --workspace = 17 pass."
     },
     {
       "id": "US-004",

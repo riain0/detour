@@ -33,3 +33,15 @@
   - US-003 (agent forwarder) must: on `broker_message::Payload::Raw` opening frame, dial upstream per connection_id and pump bytes both ways, emitting `AgentMessage::Raw` frames back with the same connection_id; is_eof closes the matching half. The broker is now ready to route those frames.
   - US-004 (sidecar) is the client of relay_connection: it must set connection_id (broker rejects empty) and service_name on the opening frame.
 ---
+
+## 2026-06-02 - US-003
+- Wired the agent-side raw byte-stream forwarder: per-connection dial + bidirectional pump.
+- Files changed:
+  - crates/agent/src/forwarder.rs: new `forward_connection(open, local_port, tx, broker_rx)`. Dials 127.0.0.1:local_port, writes the opening frame's initial payload, then runs two halves: a spawned upstream->broker reader emitting `AgentMessage::Raw` frames (same connection_id, 16384 buf, eof on read 0/err) and a broker->upstream loop draining `broker_rx`. `raw_frame()` helper builds the AgentMessage. +2 unit tests (echo pump + dial-failure-emits-eof).
+  - crates/agent/src/tunnel.rs: filled `broker_message::Payload::Raw(frame)` arm. inflight_connections map (connection_id -> mpsc::Sender<RawConnFrame>). Opening frame: route_map lookup -> spawn forward_connection with a fresh channel (insert unless is_eof). Continuation frames: forward to the per-connection channel; drop entry on eof or send failure. Unknown service_name -> warn + drop.
+- Quality: `cargo check --workspace` clean; `cargo test --workspace` = 17 pass (was 15).
+- **Learnings for future iterations:**
+  - DEADLOCK FIXED: original draft always ran the broker->upstream `while broker_rx.recv()` loop even when the opening frame had is_eof=true. With the client half already closed there are no more client frames, so recv() blocks until the sidecar drops the RelayConnection stream. The forward_connection task never returns and any handle.await on it hangs (manifested as the echo test running >60s). Fix: branch on open.is_eof — if set, just shutdown the upstream write half and skip the pump. The upstream->broker reader still drains the response. Lesson: a raw-pump half must terminate on the FIRST eof signal it sees (opening frame OR a later frame), never assume more frames will arrive to unblock recv().
+  - Test gotcha: `let (_broker_tx, rx)` keeps the sender alive to end of scope (single underscore != immediate drop), so any code awaiting the receiver's close hangs. Use the is_eof opening-frame path or `drop(broker_tx)` explicitly in tests.
+  - US-004 (sidecar) is the producer side: it must set connection_id + service_name on the opening RawConnFrame and call broker `relay_connection`. The broker (US-002) routes to this agent forwarder, now ready.
+  - Hung test binaries survive `pkill -f "cargo test"` (cargo parent dies, detached test binary keeps running). Kill with `pkill -9 -f target/debug/deps/<crate>`. macOS has no `timeout`; guard test hangs by running a single -p crate in the background and polling.
