@@ -29,6 +29,11 @@ const MAX_HEAD: usize = 64 * 1024;
 const HEAD_END: &[u8] = b"\r\n\r\n";
 const RAW_BUF: usize = 16384;
 
+/// Sent to a routed client when the broker relay cannot be established. The body
+/// is exactly "routed relay failed" (19 bytes). Used to fail closed rather than
+/// silently fall back to the local app once routing has been chosen (US-010).
+const BAD_GATEWAY: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: 19\r\nConnection: close\r\n\r\nrouted relay failed";
+
 /// The HTTP/2 client connection preface. A connection beginning with these bytes
 /// speaks HTTP/2 (h2c) — gRPC's transport — and must be sniffed at the frame
 /// level rather than as a text head.
@@ -379,10 +384,18 @@ where
     });
 
     // broker → client
-    let resp = client
-        .relay_connection(ReceiverStream::new(rx))
-        .await?
-        .into_inner();
+    let resp = match client.relay_connection(ReceiverStream::new(rx)).await {
+        Ok(r) => r.into_inner(),
+        Err(e) => {
+            // Routing was already chosen and frames may have begun streaming to
+            // the broker, so falling back to the local app is unsafe. Fail closed
+            // with an explicit 502 and never touch the upstream (US-010).
+            let _ = wr.write_all(BAD_GATEWAY).await;
+            let _ = wr.shutdown().await;
+            up.abort();
+            return Err(e.into());
+        }
+    };
     let mut inbound = resp;
     loop {
         match inbound.message().await {
@@ -456,8 +469,50 @@ fn raw_frame(connection_id: &str, payload: Vec<u8>, is_eof: bool) -> RawConnFram
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{duplex, AsyncWriteExt};
+    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
+
+    // US-010: once a connection is routed, a broker failure must fail closed with
+    // an explicit 502 — never fall back to the local app. relay_raw has no
+    // upstream parameter, so fallback is structurally impossible; this asserts
+    // the 502 is emitted when the broker is unreachable.
+    #[tokio::test]
+    async fn relay_raw_fails_closed_with_502_when_broker_unreachable() {
+        use tonic::transport::Channel;
+
+        // gRPC client pointed at a dead port — relay_connection() will fail.
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let client = DetourClient::new(channel);
+
+        // A real socket pair standing in for the routed client connection.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap().0 });
+        let mut client_sock = TcpStream::connect(addr).await.unwrap();
+        let server_sock = accept.await.unwrap();
+
+        let relay = tokio::spawn(async move {
+            relay_raw(
+                client,
+                "11111111-1111-4111-8111-111111111111".into(),
+                "conn-1".into(),
+                "svc".into(),
+                b"GET / HTTP/1.1\r\nX-Route-To: x\r\n\r\n".to_vec(),
+                server_sock,
+            )
+            .await
+        });
+
+        let mut got = Vec::new();
+        client_sock.read_to_end(&mut got).await.unwrap();
+        assert!(
+            got.starts_with(b"HTTP/1.1 502"),
+            "expected a 502, got: {:?}",
+            String::from_utf8_lossy(&got)
+        );
+        // relay_raw surfaces the broker error rather than silently succeeding.
+        assert!(relay.await.unwrap().is_err());
+    }
 
     #[tokio::test]
     async fn sniff_head_parses_request_line_headers_and_leftover() {

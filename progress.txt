@@ -111,3 +111,12 @@
   - Order in validate is the security property: identity FIRST, then authorize_services. relay open_tunnel maps any validate() Err to Status::unauthenticated and returns before registering the session/connection, so rejection happens before interception starts (AC met).
   - Two layers of scoping: per-identity (signed-token's allowed_services claim) and org-wide (DETOUR_ALLOWED_SERVICES). The claim wins when present so a narrowly-scoped token can't be widened by a permissive broker list.
   - This is allow-list authorization, not a live GCP IAM API call (which would be untestable here and add latency). For true per-principal-per-service IAM, swap authorize_services for a policy lookup (e.g. check the OIDC email against an IAM binding for the target Cloud Run service). The seam (target_services + validated identity in one place) is ready.
+
+## 2026-06-02 - US-010
+- Made sidecar fallback semantics explicit after routing: fail closed with 502, never fall back.
+- Files changed:
+  - crates/sidecar/src/raw.rs: BAD_GATEWAY const (502, body "routed relay failed"). relay_raw: on relay_connection() RPC-open failure, write the 502 to the client write half, shutdown, return Err. +1 test (relay_raw_fails_closed_with_502_when_broker_unreachable).
+- Quality: cargo test -p detour-sidecar = 10 pass (was 9).
+- **Learnings for future iterations:**
+  - The strongest guarantee is structural, not defensive: relay_raw takes no app_upstream, so it CANNOT fall back even by mistake. handle_conn only knows the upstream in the splice (non-routed) branch. So "no fallback after routing" is enforced by the type signature, and the test documents the observable 502.
+  - 502 is only emitted when the RPC fails BEFORE any client bytes were written (broker unreachable). Mid-stream broker failures just close the connection (the inbound loop breaks) — can't inject a 502 into an in-progress arbitrary protocol. Both paths avoid upstream fallback.
