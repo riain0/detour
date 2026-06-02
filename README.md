@@ -4,6 +4,8 @@ Route live cloud traffic to your local machine. No VPN, no SSH tunnels, no chang
 
 Detour adds a lightweight sidecar to your cloud service. Requests that include an `X-Route-To` header are relayed through an outbound tunnel to your machine. Everyone else hits the normal cloud app.
 
+Interception happens at the socket byte level, not as an HTTP message rewrite, so WebSockets, protocol upgrades, gRPC (HTTP/2, including trailers), server-sent events, and chunked streams are relayed verbatim. Routed connections never fall back to the cloud app once streaming has started.
+
 ```
 Browser / curl
   │
@@ -55,7 +57,15 @@ Without Redis the broker falls back to in-memory automatically.
 | `PORT` | `8080` | gRPC listen port |
 | `REDIS_URL` | `redis://127.0.0.1:6379` | Session storage. Falls back to in-memory if unreachable |
 | `DETOUR_SESSION_TTL_SECS` | `28800` | Session lifetime in seconds (8 h) |
-| `DETOUR_AUTH_MODE` | `session-id` | `session-id` or `signed-token` |
+| `DETOUR_AUTH_MODE` | `session-id` | `session-id`, `signed-token`, or `gcp-oidc` |
+| `DETOUR_ALLOWED_SERVICES` | `""` | Comma-separated allow-list of interceptable services. Unset means no restriction. A session is rejected if it targets a service outside the list |
+| `DETOUR_GCP_OIDC_AUDIENCE` | `""` | Expected audience when validating Google identity tokens (`gcp-oidc` mode) |
+| `DETOUR_ALLOWED_EMAIL_DOMAIN` | `""` | Restrict `gcp-oidc` identities to this email domain |
+| `DETOUR_JWT_SECRET` | `""` | HMAC secret for `signed-token` mode |
+
+### Authorization
+
+In `signed-token` mode a token's own `allowed_services` claim is authoritative when present (per-identity scoping); otherwise the broker-wide `DETOUR_ALLOWED_SERVICES` list applies. In `gcp-oidc` and `session-id` modes the broker-wide list is the gate. Unauthorized identities are rejected before any interception starts.
 
 ### Broker IaC
 
@@ -267,6 +277,29 @@ The VS Code extension can do this automatically. Open a Detour terminal (`Ctrl+S
 
 Builds of `libdetour_layer.so` (Linux) and `libdetour_layer.dylib` (macOS) are included in each release. The layer rewrites both IPv4 and IPv6 connects, intercepts `getaddrinfo()`, legacy `gethostbyname*()`, Linux `gethostbyname*_r()`, and simple macOS `connectx()` TCP connects, and synthesizes fake DNS answers when private cloud hostnames do not resolve on your machine.
 
+#### Chained service-to-service detours
+
+To route outbound HTTP calls from your local process to another detoured service, set `DETOUR_ROUTE_TO`. The layer injects an `X-Route-To` header on outbound HTTP/1.x requests, so a request from your machine can be routed back to a teammate's local instance of the downstream service. Requests without the env set, non-HTTP traffic, and requests that already carry the header are left unmodified.
+
+```bash
+DETOUR_ROUTE_TO=<downstream-session-id> \
+LD_PRELOAD=/path/to/libdetour_layer.so \
+DETOUR_SOCKS5_PORT=1081 \
+node server.js
+```
+
+#### Statically-linked binaries (TUN mode)
+
+`LD_PRELOAD`/`DYLD_INSERT_LIBRARIES` cannot intercept statically-linked binaries (notably Go) because they bypass libc. For those, start the agent in TUN mode:
+
+```bash
+detour start --route my-api:3000 --mode tun --broker https://broker.example.com
+```
+
+TUN mode routes the process's outbound packets through the SOCKS5 proxy regardless of linking. It needs elevated privileges and a platform TUN device (`/dev/net/tun` on Linux, `utun` on macOS).
+
+#### Bypassing dependencies
+
 If a specific dependency should stay local, set bypass env vars before starting your app:
 
 ```bash
@@ -290,7 +323,9 @@ Mappings are `PATH_PREFIX=HOST:PORT` pairs separated by `;`. Prefix matching mea
 |---|---|---|---|
 | `--route SERVICE:PORT` | | | Service name and local port. Repeatable |
 | `--broker URL` | `DETOUR_BROKER_URL` | `http://localhost:50051` | Broker URL |
+| `--auth-mode` | | `session-id` | `session-id`, `signed-token`, or `gcp-oidc` |
 | `--socks5-port` | | `1081` | SOCKS5 proxy port for outbound tunneling |
+| `--mode` | | `preload` | Local interception mode: `preload` (LD_PRELOAD/DYLD shim) or `tun` (TUN device, covers statically-linked binaries) |
 | `--output` | | `human` | `human` or `json` (for tooling integrations) |
 
 ### Local status
