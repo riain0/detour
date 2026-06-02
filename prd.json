@@ -57,8 +57,8 @@
         "cargo test passes"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Rewrote the sidecar from an axum HTTP handler to a sniffing raw TCP proxy. New crates/sidecar/src/raw.rs: sniff_head() reads only the HTTP/1.x request head (up to CRLFCRLF, capped at 64KB) to extract X-Route-To, returning the verbatim head + any pipelined bytes (or Err(raw) for non-HTTP/2-preface so the caller splices verbatim). relay_raw() pumps a routed connection over the broker RelayConnection RPC keyed by a fresh connection_id: opening frame carries session_id/connection_id/service_name + the sniffed bytes, client->broker frames stream raw, broker->client frames written back, is_eof closes each half. splice_upstream() raw-proxies non-routed connections to the local app. proxy.rs handle_conn() ties it together (healthz short-circuit, route resolve, raw relay vs splice). main.rs replaced axum::serve with a TcpListener accept loop spawning handle_conn (set_nodelay). Dropped max_body_mb from ProxyState (raw plane does not buffer bodies). +4 unit tests (head parse + leftover, non-HTTP raw fallback, websocket head-then-raw, splice both ways). cargo check + cargo test --workspace = 21 pass."
     },
     {
       "id": "US-005",

@@ -2,20 +2,20 @@ mod cache;
 mod config;
 mod inspector;
 mod proxy;
+mod raw;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::{routing::any, Router};
 use tonic::transport::{Channel, ClientTlsConfig};
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use detour_proto::detour::detour_client::DetourClient;
 
 use cache::SessionCache;
 use inspector::CachedResolver;
-use proxy::{handler, ProxyState};
+use proxy::{handle_conn, ProxyState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -54,16 +54,24 @@ async fn main() -> anyhow::Result<()> {
         broker_client,
         service_name: cfg.service_name.clone(),
         log_routed: cfg.log_routed_requests,
-        max_body_mb: cfg.max_body_size_mb,
     };
 
-    let app = Router::new().fallback(any(handler)).with_state(state);
-
     let addr: SocketAddr = format!("0.0.0.0:{}", cfg.listen_port).parse()?;
-    info!(%addr, "HTTP listener ready");
-
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    info!(%addr, "raw TCP listener ready");
 
-    Ok(())
+    loop {
+        let (sock, _peer) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                warn!(error = %e, "accept failed");
+                continue;
+            }
+        };
+        let _ = sock.set_nodelay(true);
+        let state = state.clone();
+        tokio::spawn(async move {
+            handle_conn(sock, state).await;
+        });
+    }
 }
