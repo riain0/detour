@@ -67,3 +67,14 @@
 - Quality: cargo test --workspace passes (sidecar = 5 tests).
 - **Learnings for future iterations:**
   - US-005 was structurally free once US-004 stopped buffering bodies. The detection exists to make the invariant explicit/observable, not to branch behavior. If a future change reintroduces any body buffering on the routed path, is_upgrade is the guard to branch on.
+
+## 2026-06-02 - US-006
+- Brought gRPC (HTTP/2) onto the raw data plane; byte-transparency preserves bidi framing + trailers.
+- Files changed:
+  - crates/sidecar/src/raw.rs: sniff_head now returns enum Sniff { Http1{head,rest}, Http2{buffered}, Raw{buffered} } and detects H2_PREFACE ("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n") BEFORE the CRLFCRLF head search (the preface contains a CRLFCRLF, so order matters). read_h2_route() reads frames until first_headers_block() finds the first HEADERS frame (skips SETTINGS/etc, strips PADDED/PRIORITY) then hpack_find() extracts x-route-to. Minimal HPACK: decode_int (var-length integer, N-bit prefix), decode_str (string literal; returns None for Huffman bit set), hpack_find (literal incremental/without/never-indexed; skips indexed + dyn-table-size-update). +5 tests.
+  - crates/sidecar/src/proxy.rs: handle_conn matches Sniff. Http2 arm reads the route, builds a HeaderMap{x-route-to} and shares route_or_splice() with the Http1 arm. Extracted route_or_splice() helper (resolve -> relay_raw | splice).
+- Quality: cargo test --workspace passes (sidecar = 9 tests).
+- **Learnings for future iterations:**
+  - The win is byte-transparency: once a connection is on relay_raw, we never reshape it, so HTTP/2 DATA frames, flow control, and trailing-HEADERS (gRPC trailers / grpc-status) all survive unchanged. "Trailer support" needed no trailer-specific code — it falls out of not parsing.
+  - HARD LIMIT: the HPACK decoder has no Huffman table. Real gRPC clients often Huffman-code header values, so x-route-to extraction can return None and the connection will splice (fail-safe, not misroute). To make h2 routing robust for arbitrary clients, add the static Huffman decode table to decode_str, OR have the detour client send x-route-to as a literal-never-indexed, non-Huffman field. CONTINUATION frames (HEADERS split across frames) are also not reassembled — assumes END_HEADERS on the first HEADERS frame.
+  - first_headers_block reads from buffered[H2_PREFACE.len()..]; read_h2_route caps at MAX_H2_SNIFF (32KB) to avoid unbounded buffering on a client that never sends HEADERS.

@@ -85,8 +85,8 @@
         "cargo test passes"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "gRPC is HTTP/2; the US-004 text-head sniffer sent it to passthrough. Added h2 routing: sniff_head now returns a Sniff enum (Http1/Http2/Raw) and detects the HTTP/2 client preface before the CRLFCRLF search (the preface itself contains a CRLFCRLF). read_h2_route() walks frames to the first HEADERS frame (first_headers_block: skips SETTINGS etc., applies PADDED/PRIORITY) and extracts x-route-to via a minimal HPACK decoder (decode_int/decode_str/hpack_find: literal reps + indexed/dyn-size skips). proxy.rs handle_conn routes the whole h2 connection raw when a session resolves, else splices. Because relay_raw is byte-transparent, HTTP/2 framing AND trailers (trailing HEADERS frame) ride through unchanged end to end. Documented limitation: the HPACK decoder does not implement Huffman string decoding, so a Huffman-coded x-route-to value yields None and the connection splices rather than misroutes (x-route-to is custom, not in the static table, so always emitted as a literal name). +5 tests (preface detect, hpack literal extract, end-to-end read_h2_route, huffman-value None). cargo test --workspace passes."
     },
     {
       "id": "US-007",

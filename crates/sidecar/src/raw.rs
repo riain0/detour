@@ -29,6 +29,11 @@ const MAX_HEAD: usize = 64 * 1024;
 const HEAD_END: &[u8] = b"\r\n\r\n";
 const RAW_BUF: usize = 16384;
 
+/// The HTTP/2 client connection preface. A connection beginning with these bytes
+/// speaks HTTP/2 (h2c) — gRPC's transport — and must be sniffed at the frame
+/// level rather than as a text head.
+pub const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
 /// The sniffed start of an HTTP/1.x connection. `raw` is the verbatim head bytes
 /// (request line + headers + terminating CRLFCRLF) so they can be replayed
 /// downstream without loss.
@@ -39,37 +44,68 @@ pub struct Head {
     pub headers: HeaderMap,
 }
 
-/// Read from `io` until the end of the HTTP request head (CRLFCRLF).
-///
-/// On success returns `Ok((Head, rest))` where `rest` is any bytes already read
-/// past the head (pipelined body bytes). If the stream closes early, exceeds
-/// [`MAX_HEAD`], or the head is not parseable HTTP/1.x (e.g. an HTTP/2 preface),
-/// returns `Err(raw)` with all bytes consumed so the caller can splice them
-/// verbatim.
-pub async fn sniff_head<R: AsyncRead + Unpin>(
-    io: &mut R,
-) -> io::Result<Result<(Head, Vec<u8>), Vec<u8>>> {
+/// Outcome of sniffing the start of a connection. Every variant carries the
+/// bytes already consumed so the caller can replay them verbatim downstream.
+pub enum Sniff {
+    /// An HTTP/1.x request whose head was parsed; `rest` is any pipelined body.
+    Http1 { head: Head, rest: Vec<u8> },
+    /// An HTTP/2 (h2c) connection. `buffered` holds the preface (and possibly
+    /// more) read so far — gRPC routing reads further frames (US-006).
+    Http2 { buffered: Vec<u8> },
+    /// Not recognizably HTTP/1.x or /2; splice the buffered bytes verbatim.
+    Raw { buffered: Vec<u8> },
+}
+
+/// Sniff the start of a connection: detect the HTTP/2 preface, otherwise read up
+/// to the end of an HTTP/1.x request head (CRLFCRLF). Falls back to [`Sniff::Raw`]
+/// on early EOF, an over-long head, or an unparseable head.
+pub async fn sniff_head<R: AsyncRead + Unpin>(io: &mut R) -> io::Result<Sniff> {
     let mut buf = BytesMut::with_capacity(8192);
     let mut tmp = [0u8; 8192];
 
     loop {
+        // HTTP/2 preface detection takes priority: "PRI * HTTP/2.0\r\n\r\n..."
+        // contains a CRLFCRLF, so we must rule it in/out before the head search.
+        if buf.starts_with(H2_PREFACE) {
+            return Ok(Sniff::Http2 {
+                buffered: buf.to_vec(),
+            });
+        }
+        if buf.len() < H2_PREFACE.len() && !buf.is_empty() && H2_PREFACE.starts_with(&buf) {
+            // Still a possible preface prefix — read more before deciding.
+            let n = io.read(&mut tmp).await?;
+            if n == 0 {
+                return Ok(Sniff::Raw {
+                    buffered: buf.to_vec(),
+                });
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            continue;
+        }
+
         if let Some(pos) = find_subsequence(&buf, HEAD_END) {
             let head_end = pos + HEAD_END.len();
             let raw = buf[..head_end].to_vec();
             let rest = buf[head_end..].to_vec();
             return Ok(match parse_head(&raw) {
-                Some(head) => Ok((head, rest)),
-                None => Err(buf.to_vec()),
+                Some(head) => Sniff::Http1 { head, rest },
+                None => Sniff::Raw {
+                    buffered: buf.to_vec(),
+                },
             });
         }
 
         if buf.len() >= MAX_HEAD {
-            return Ok(Err(buf.to_vec()));
+            return Ok(Sniff::Raw {
+                buffered: buf.to_vec(),
+            });
         }
 
         let n = io.read(&mut tmp).await?;
         if n == 0 {
-            return Ok(Err(buf.to_vec()));
+            return Ok(Sniff::Raw {
+                buffered: buf.to_vec(),
+            });
         }
         buf.extend_from_slice(&tmp[..n]);
     }
@@ -127,6 +163,165 @@ pub fn is_upgrade(headers: &HeaderMap) -> bool {
         .unwrap_or(false);
 
     connection_upgrade && headers.contains_key(http::header::UPGRADE)
+}
+
+/// Upper bound on bytes read while looking for the first HTTP/2 HEADERS frame.
+const MAX_H2_SNIFF: usize = 32 * 1024;
+
+/// Read further HTTP/2 frames from `io` (starting from `buffered`, which already
+/// holds the preface) until the first HEADERS frame is found, then extract the
+/// `x-route-to` header from its HPACK block (US-006).
+///
+/// Returns `(route, buffered)` where `route` is the header value if found and
+/// `buffered` is every byte consumed, so the caller can replay the whole prefix
+/// verbatim whether it routes or splices. The HPACK decoder is minimal: it does
+/// not implement Huffman string decoding, so a Huffman-coded value yields `None`
+/// and the connection is spliced rather than misrouted.
+pub async fn read_h2_route<R: AsyncRead + Unpin>(
+    io: &mut R,
+    mut buffered: Vec<u8>,
+) -> io::Result<(Option<String>, Vec<u8>)> {
+    let mut tmp = [0u8; 8192];
+    loop {
+        if let Some(block) = first_headers_block(&buffered[H2_PREFACE.len()..]) {
+            return Ok((hpack_find(block, "x-route-to"), buffered));
+        }
+        if buffered.len() >= MAX_H2_SNIFF {
+            return Ok((None, buffered));
+        }
+        let n = io.read(&mut tmp).await?;
+        if n == 0 {
+            return Ok((None, buffered));
+        }
+        buffered.extend_from_slice(&tmp[..n]);
+    }
+}
+
+/// Walk HTTP/2 frames and return the header block fragment of the first HEADERS
+/// frame (type 0x1), with PADDED/PRIORITY adjustments applied. Returns None if no
+/// complete HEADERS frame is present yet.
+fn first_headers_block(buf: &[u8]) -> Option<&[u8]> {
+    let mut i = 0;
+    while i + 9 <= buf.len() {
+        let len = ((buf[i] as usize) << 16) | ((buf[i + 1] as usize) << 8) | buf[i + 2] as usize;
+        let ftype = buf[i + 3];
+        let flags = buf[i + 4];
+        let start = i + 9;
+        let end = start.checked_add(len)?;
+        if end > buf.len() {
+            return None; // frame not fully read yet
+        }
+        if ftype == 0x1 {
+            let mut p = &buf[start..end];
+            if flags & 0x8 != 0 {
+                // PADDED: first byte is pad length, trailing pad stripped.
+                if p.is_empty() {
+                    return None;
+                }
+                let pad = p[0] as usize;
+                p = &p[1..];
+                p = p.get(..p.len().checked_sub(pad)?)?;
+            }
+            if flags & 0x20 != 0 {
+                // PRIORITY: 5 bytes (stream dependency + weight).
+                p = p.get(5..)?;
+            }
+            return Some(p);
+        }
+        i = end;
+    }
+    None
+}
+
+/// Minimal HPACK scan for a literal header field named `target`. Handles the
+/// three literal representations (incremental indexing / without indexing /
+/// never indexed), skips indexed fields and dynamic-table-size updates, and
+/// returns the decoded value — or None if absent or Huffman-coded. Header names
+/// referenced by static-table index (name_idx != 0) are not resolved, so
+/// `x-route-to` must be sent as a literal name (it is not in the static table,
+/// so a compliant encoder always emits it literally).
+fn hpack_find(block: &[u8], target: &str) -> Option<String> {
+    let mut i = 0;
+    while i < block.len() {
+        let b = block[i];
+        let prefix = if b & 0x80 != 0 {
+            // Indexed header field — integer only, no literal payload.
+            i = decode_int(block, i, 7)?.1;
+            continue;
+        } else if b & 0x40 != 0 {
+            6 // literal, incremental indexing
+        } else if b & 0x20 != 0 {
+            // Dynamic table size update — integer only.
+            i = decode_int(block, i, 5)?.1;
+            continue;
+        } else {
+            4 // literal without indexing / never indexed
+        };
+
+        let (name_idx, after_idx) = decode_int(block, i, prefix)?;
+        let (name, after_name) = if name_idx == 0 {
+            let (s, j) = decode_str(block, after_idx)?;
+            (Some(s), j)
+        } else {
+            (None, after_idx)
+        };
+        let (value, after_value) = decode_str(block, after_name)?;
+        if name.as_deref() == Some(target) {
+            return Some(value);
+        }
+        i = after_value;
+    }
+    None
+}
+
+/// Decode an HPACK variable-length integer with an `prefix`-bit prefix at `pos`.
+/// Returns `(value, next_index)`.
+fn decode_int(buf: &[u8], pos: usize, prefix: u32) -> Option<(usize, usize)> {
+    if pos >= buf.len() {
+        return None;
+    }
+    let mask = (1u32 << prefix) - 1;
+    let mut i = pos;
+    let mut value = (buf[i] as u32) & mask;
+    i += 1;
+    if value < mask {
+        return Some((value as usize, i));
+    }
+    let mut shift = 0;
+    loop {
+        if i >= buf.len() {
+            return None;
+        }
+        let b = buf[i];
+        i += 1;
+        value = value.checked_add(((b & 0x7f) as u32).checked_shl(shift)?)?;
+        shift += 7;
+        if b & 0x80 == 0 {
+            break;
+        }
+        if shift > 28 {
+            return None;
+        }
+    }
+    Some((value as usize, i))
+}
+
+/// Decode an HPACK string literal at `pos`. Returns None for Huffman-coded
+/// strings (unsupported in this minimal decoder).
+fn decode_str(buf: &[u8], pos: usize) -> Option<(String, usize)> {
+    if pos >= buf.len() {
+        return None;
+    }
+    let huffman = buf[pos] & 0x80 != 0;
+    let (len, i) = decode_int(buf, pos, 7)?;
+    let end = i.checked_add(len)?;
+    if end > buf.len() {
+        return None;
+    }
+    if huffman {
+        return None;
+    }
+    Some((String::from_utf8(buf[i..end].to_vec()).ok()?, end))
 }
 
 /// Relay a routed connection over the broker `RelayConnection` RPC as raw
@@ -272,8 +467,8 @@ mod tests {
             .unwrap();
         a.shutdown().await.unwrap();
 
-        let Ok((head, rest)) = sniff_head(&mut b).await.unwrap() else {
-            panic!("expected a parsed head");
+        let Sniff::Http1 { head, rest } = sniff_head(&mut b).await.unwrap() else {
+            panic!("expected a parsed HTTP/1 head");
         };
         assert_eq!(head.method, "GET");
         assert_eq!(head.path, "/foo?x=1");
@@ -292,10 +487,10 @@ mod tests {
         a.write_all(b"not http, no head terminator").await.unwrap();
         a.shutdown().await.unwrap();
 
-        let Err(raw) = sniff_head(&mut b).await.unwrap() else {
+        let Sniff::Raw { buffered } = sniff_head(&mut b).await.unwrap() else {
             panic!("expected the raw fallback");
         };
-        assert_eq!(raw, b"not http, no head terminator");
+        assert_eq!(buffered, b"not http, no head terminator");
     }
 
     // Upgrade requests carry their handshake in the head, then the connection
@@ -311,12 +506,94 @@ mod tests {
         .unwrap();
         a.shutdown().await.unwrap();
 
-        let Ok((head, rest)) = sniff_head(&mut b).await.unwrap() else {
-            panic!("expected a parsed head");
+        let Sniff::Http1 { head, rest } = sniff_head(&mut b).await.unwrap() else {
+            panic!("expected a parsed HTTP/1 head");
         };
         assert_eq!(head.headers.get("upgrade").unwrap(), "websocket");
         // The post-handshake WebSocket frame bytes are returned unparsed.
         assert_eq!(rest, b"\x81\x05hello");
+    }
+
+    /// Build a single h2 HEADERS frame whose HPACK block carries one literal,
+    /// non-Huffman header (END_HEADERS|END_STREAM, stream 1, no padding/priority).
+    fn h2_headers_frame(name: &str, value: &str) -> Vec<u8> {
+        let mut block = vec![0x00u8]; // literal without indexing, new name (idx 0)
+        block.push(name.len() as u8); // string len, huffman bit clear
+        block.extend_from_slice(name.as_bytes());
+        block.push(value.len() as u8);
+        block.extend_from_slice(value.as_bytes());
+
+        let len = block.len();
+        let mut frame = vec![
+            (len >> 16) as u8,
+            (len >> 8) as u8,
+            len as u8,
+            0x01, // type HEADERS
+            0x05, // flags END_HEADERS | END_STREAM
+            0x00,
+            0x00,
+            0x00,
+            0x01, // stream id 1
+        ];
+        frame.extend_from_slice(&block);
+        frame
+    }
+
+    fn h2_settings_frame() -> Vec<u8> {
+        // Empty SETTINGS frame (length 0, type 0x4, stream 0) — what a client
+        // sends right after the preface, before HEADERS.
+        vec![0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]
+    }
+
+    #[tokio::test]
+    async fn sniff_head_detects_http2_preface() {
+        let (mut a, mut b) = duplex(4096);
+        let mut bytes = H2_PREFACE.to_vec();
+        bytes.extend_from_slice(&h2_settings_frame());
+        a.write_all(&bytes).await.unwrap();
+        a.shutdown().await.unwrap();
+
+        let Sniff::Http2 { buffered } = sniff_head(&mut b).await.unwrap() else {
+            panic!("expected HTTP/2");
+        };
+        assert!(buffered.starts_with(H2_PREFACE));
+    }
+
+    #[test]
+    fn hpack_find_extracts_literal_header() {
+        let frame = h2_headers_frame("x-route-to", "sess-uuid");
+        let block = first_headers_block(&frame).expect("headers block");
+        assert_eq!(hpack_find(block, "x-route-to").as_deref(), Some("sess-uuid"));
+        assert_eq!(hpack_find(block, "missing"), None);
+    }
+
+    // End to end over a socket: preface + SETTINGS + HEADERS(x-route-to). The
+    // route is extracted and every consumed byte is returned for verbatim replay.
+    #[tokio::test]
+    async fn read_h2_route_extracts_route_from_first_headers_frame() {
+        let (mut a, mut b) = duplex(8192);
+        let mut bytes = H2_PREFACE.to_vec();
+        bytes.extend_from_slice(&h2_settings_frame());
+        bytes.extend_from_slice(&h2_headers_frame("x-route-to", "the-session"));
+        a.write_all(&bytes).await.unwrap();
+        a.shutdown().await.unwrap();
+
+        let Sniff::Http2 { buffered } = sniff_head(&mut b).await.unwrap() else {
+            panic!("expected HTTP/2");
+        };
+        let (route, consumed) = read_h2_route(&mut b, buffered).await.unwrap();
+        assert_eq!(route.as_deref(), Some("the-session"));
+        assert!(consumed.starts_with(H2_PREFACE));
+    }
+
+    #[test]
+    fn hpack_find_returns_none_for_huffman_value() {
+        // Same literal header but with the Huffman bit set on the value string.
+        let mut block = vec![0x00u8, "x-route-to".len() as u8];
+        block.extend_from_slice(b"x-route-to");
+        block.push(0x80 | 3); // huffman flag + len 3
+        block.extend_from_slice(&[0xaa, 0xbb, 0xcc]);
+        assert_eq!(hpack_find(&block, "x-route-to"), None);
     }
 
     #[test]
