@@ -113,8 +113,8 @@
         "cargo test passes"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "The target service identifier the session intends to intercept is already captured on RegisterSession.routes (service_name per RouteEntry) and persisted on SessionRecord.routes. US-008 makes it available to broker auth during connection setup: AuthService::validate now takes target_services: &[String]. relay.rs open_tunnel collects the route service names into target_services BEFORE calling validate and passes them. validate_jwt also takes target_services (seam for US-009's allowed_services enforcement). Additive: no proto change, SessionRecord unchanged (routes are the source of truth). +2 auth unit tests (session-id mode accepts targets; signed-token still requires a token). cargo test -p detour-broker = 6 pass."
     },
     {
       "id": "US-009",

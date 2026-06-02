@@ -89,3 +89,14 @@
   - fd REUSE is the sharp edge: without close() untracking, a recycled fd could carry a non-routed HTTP request and get injected. close() hook clears it; inject_route_header's HTTP-request-line guard is the backstop.
   - Interposing send/write/close widens blast radius to ALL fds in the process. Safe because untracked fds hit a HashMap miss and pass straight through; hooks call real_* via RTLD_NEXT (no recursion). Still, this is the riskiest hook set in the layer — keep the fast path allocation-free.
   - Limits (documented): the full request head must arrive in the first send/write (clients usually do this); non-blocking EAGAIN mid-rewrite aborts to plain passthrough; HEADERS-in-h2 / Go-static (no libc) are not covered here.
+
+## 2026-06-02 - US-008
+- Made the session's target services available to broker auth during connection setup.
+- Files changed:
+  - crates/broker/src/auth.rs: AuthService::validate gained a target_services: &[String] param (the services the session will intercept). Threaded into validate_jwt (placeholder use; US-009 enforces against the JWT allowed_services claim). +2 unit tests.
+  - crates/broker/src/relay.rs: open_tunnel collects reg.routes service names into target_services BEFORE validate (routes are consumed afterward) and passes them.
+- Quality: cargo test -p detour-broker = 6 pass (was 4).
+- **Learnings for future iterations:**
+  - No proto/SessionRecord change needed: RegisterSession.routes already carry the target service identifiers and SessionRecord.routes persists them. US-008 is purely the auth plumbing — capture (routes) was already there; "availability to auth" was the gap.
+  - ORDER MATTERS in open_tunnel: reg.routes is moved into the ServiceRoute Vec, so target_services must be collected (cloned) from reg.routes BEFORE that map-collect, and before validate runs.
+  - US-009 plugs into two spots: validate_jwt (signed-token: target_services ⊆ allowed_services) and a new gcp-oidc service-permission check. The data is now in hand at both.

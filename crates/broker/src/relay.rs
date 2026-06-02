@@ -106,7 +106,20 @@ impl Detour for RelayService {
                             }
                         };
 
-                        if let Err(e) = auth.validate(&sid, bearer_token.as_deref()).await {
+                        // The services this session intends to intercept — the
+                        // registered route service names. Captured here and
+                        // handed to auth so authorization is scoped to the
+                        // target service (US-008).
+                        let target_services: Vec<String> = reg
+                            .routes
+                            .iter()
+                            .map(|r| r.service_name.clone())
+                            .collect();
+
+                        if let Err(e) = auth
+                            .validate(&sid, &target_services, bearer_token.as_deref())
+                            .await
+                        {
                             let _ = tx_clone
                                 .send(Err(Status::unauthenticated(e.to_string())))
                                 .await;
