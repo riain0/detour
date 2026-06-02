@@ -6,6 +6,7 @@ use detour_agent::{AgentConfig, AgentHandle};
 use detour_core::{AuthMode, ServiceRoute, TunnelStatus};
 
 use crate::auth::resolve_auth_token;
+use crate::commands::tun::InterceptMode;
 
 #[derive(Args)]
 pub struct StartArgs {
@@ -32,6 +33,11 @@ pub struct StartArgs {
     /// Local port for the outbound SOCKS5 proxy (set LD_PRELOAD + DETOUR_SOCKS5_PORT to use)
     #[arg(long, default_value = "1081")]
     pub socks5_port: u16,
+
+    /// Interception mode: "preload" (default, LD_PRELOAD/DYLD shim) or "tun"
+    /// (TUN device, covers static binaries the shim cannot)
+    #[arg(long, default_value = "preload")]
+    pub mode: String,
 }
 
 pub async fn run(args: StartArgs) -> anyhow::Result<()> {
@@ -43,6 +49,9 @@ pub async fn run(args: StartArgs) -> anyhow::Result<()> {
         .auth_mode
         .parse()
         .map_err(|e: detour_core::DetourError| anyhow::anyhow!(e))?;
+
+    // Default is the preload shim; "tun" dispatches the TUN interception path.
+    let mode: InterceptMode = args.mode.parse()?;
 
     let routes = args
         .routes
@@ -113,10 +122,18 @@ pub async fn run(args: StartArgs) -> anyhow::Result<()> {
             }
             eprintln!();
             eprintln!("  Status: connected");
+            eprintln!("  Mode:   {}", args.mode);
             eprintln!();
         }
     } else {
         anyhow::bail!("failed to connect to broker — check broker URL and network");
+    }
+
+    // Dispatch the chosen local interception path. Preload is the default and
+    // needs no agent-side setup (the user attaches the shim to their process);
+    // TUN brings up the device-based path (US-011).
+    if mode == InterceptMode::Tun {
+        crate::commands::tun::activate(args.socks5_port).await?;
     }
 
     tokio::signal::ctrl_c().await?;

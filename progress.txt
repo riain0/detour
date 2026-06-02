@@ -120,3 +120,14 @@
 - **Learnings for future iterations:**
   - The strongest guarantee is structural, not defensive: relay_raw takes no app_upstream, so it CANNOT fall back even by mistake. handle_conn only knows the upstream in the splice (non-routed) branch. So "no fallback after routing" is enforced by the type signature, and the test documents the observable 502.
   - 502 is only emitted when the RPC fails BEFORE any client bytes were written (broker unreachable). Mid-stream broker failures just close the connection (the inbound loop breaks) — can't inject a 502 into an in-progress arbitrary protocol. Both paths avoid upstream fallback.
+
+## 2026-06-02 - US-011
+- Added `detour start --mode tun` CLI dispatch; default stays preload.
+- Files changed:
+  - crates/cli/src/commands/tun.rs (NEW): InterceptMode { Preload (default), Tun } + FromStr (preload/ld-preload, tun/tun-tap; trims, case-insensitive; errors otherwise). activate(socks5_port): ensure_supported() (Linux/macOS) then logs intent + warns the device backend is pending. +3 tests.
+  - crates/cli/src/commands/mod.rs: pub mod tun.
+  - crates/cli/src/commands/start.rs: --mode arg (default "preload"), parsed early via InterceptMode (invalid => fast error), prints Mode, and on Tun calls tun::activate after connect. Preload path unchanged.
+- Quality: cargo test -p detour-cli = 8 pass (was 5).
+- **Learnings for future iterations:**
+  - `start` only runs the agent tunnel; it does NOT itself attach the preload shim (that is the `run` subcommand spawning a child with LD_PRELOAD). So --mode on `start` selects the LOCAL interception strategy the operator will use; tun is the only one needing agent-side device setup.
+  - REMAINING WORK for real TUN: pull in a tun device crate (utun on macOS, /dev/net/tun on Linux), require elevated privileges, and run a packet->SOCKS5 forwarder (tun2socks-style) pointing at 127.0.0.1:socks5_port. activate() is the single entrypoint to flesh out; the CLI surface + dispatch + default are done and tested.

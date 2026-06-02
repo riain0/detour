@@ -156,8 +156,8 @@
         "cargo test passes"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added `detour start --mode <preload|tun>` (default preload). New crates/cli/src/commands/tun.rs: InterceptMode enum (Default=Preload) with FromStr (preload/ld-preload, tun/tun-tap, case+trim tolerant, errors on unknown) and async activate(socks5_port) that checks platform support (Linux/macOS) and dispatches the TUN path. start.rs: added --mode arg, parses it early (invalid mode fails fast), prints the mode, and on InterceptMode::Tun calls tun::activate after the tunnel connects; preload is unchanged (no agent-side setup). Documented limit: the TUN device + packet->SOCKS5 forwarder (tun2socks) backend is not yet wired — activate() validates prerequisites and warns clearly rather than pretending static binaries are covered. +3 tests (default, parse matrix, reject unknown). cargo test -p detour-cli = 8 pass."
     },
     {
       "id": "US-012",
